@@ -1,0 +1,16 @@
+{
+  "data": {
+    "root": "data/full", "seed": 20261016, "frames": 64,
+    "train": 8000, "validation": 500, "calibration": 500, "test": 1000,
+    "ood_per_condition": 500
+  },
+  "physics": {"dt": 0.03333333333333333, "substeps": 4, "radius": 0.06, "drag": 0.2, "restitution": 0.9},
+  "training": {
+    "seeds": [0, 1, 2], "batch_size": 32, "learning_rate": 0.001,
+    "perception_epochs": 30, "decoder_epochs": 20, "dynamics_epochs": 45,
+    "windows_per_episode": 4, "patience": 5, "residual_weight": 0.0001,
+    "num_workers": 0, "cpu_threads": 4
+  },
+  "evaluation": {"horizons": [10, 20, 50], "batch_size": 32, "max_episodes": null},
+  "outputs": {"root": "runs/full"}
+}
