@@ -11,9 +11,6 @@ import torch
 
 
 PAIRS = ((0, 1), (0, 2), (1, 2))
-CONTACT_NAMES = tuple(f"ball_{i}_{j}" for i, j in PAIRS) + tuple(
-    f"ball_{i}_{wall}" for i in range(3) for wall in ("left", "right", "top", "bottom")
-)
 COLORS = ((0.95, 0.18, 0.20), (0.18, 0.78, 0.36), (0.20, 0.45, 0.98))
 
 

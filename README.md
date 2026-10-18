@@ -2,6 +2,65 @@
 
 A small research prototype that predicts top-down ball motion from four RGB frames and known future impulses. It compares learned recurrent dynamics with an imperfect simulator, fitted physics, and learned residual physics. State labels are used during training; inference receives only video and actions.
 
+## Local production beta
+
+The local app provides **Simulation**, **Forecast** and **Backtest** workspaces at [localhost:8000](http://127.0.0.1:8000). Simulation uses the trained synthetic-disc predictors. Forecast is an experimental LTX generated continuation of uploaded video; Backtest withholds the recorded future and scores only after saving the prediction. Generated realism is not evidence of physical accuracy.
+
+After the Python setup below, build and start the app:
+
+```powershell
+.\.venv\Scripts\python -m pip install -e ".[app,app-test]"
+cd frontend
+npm ci
+npm test
+npm run build
+cd ..
+python -m nwm export-serving --config configs/smoke.json --output D:/NeuralWorldModel/bundles/smoke
+run.bat app
+```
+
+Use the project virtual environment for all `python` commands. The **Neural World Model App** desktop shortcut starts the same launcher. `configs/app.json` controls storage and bundle locations. The checked-in configuration uses CPU inference so simulations can run while the full experiment occupies the GPU. The served smoke bundle is explicitly undertrained. Publish the full bundle only after full training, evaluation and calibration finish:
+
+```powershell
+python -m nwm experiment-status --config configs/full.json
+python -m nwm export-serving --config configs/full.json --output D:/NeuralWorldModel/bundles/full
+```
+
+Exports are immutable, checksum-verified, dataset-free bundles. Their manifest records validation selection, training completion and calibration provenance. Publish a new directory and update the app config to change an existing bundle. Live training directories are never served directly.
+
+Jobs survive restart in SQLite. One supervised process owns inference, with four queued jobs, cancellation, a 20-minute timeout and recovery of interrupted jobs. Failed/interrupted jobs can be retried. Results include actual comparison videos, curves, measurements and calibrated synthetic position radii. Forecast has no accuracy score without recorded targets and no calibrated uncertainty estimate. Simulation radii are conditional on shared perception; changed physics can invalidate coverage.
+
+The app binds only to `127.0.0.1`. It has no authentication, remote access or multi-user deployment support. Uploads accept MP4/WebM up to 100 MiB, 30 seconds and 1080p (including portrait). Prefixes are sampled causally at 16 FPS and aspect-preserving letterboxing is recorded. Simulation actions use frame 1 for the transition immediately after the last observed frame. Real-video generation does not support interventions.
+
+Managed files stay inside `D:/NeuralWorldModel`, capped at 27 GiB with 8 GiB free reserved. Deleting the last job referencing an upload also reclaims that upload. Unreferenced uploads can be deleted at `DELETE /api/uploads/{id}`. No automatic model download or cloud execution occurs.
+
+### Experimental video prerequisites
+
+The candidate is [LTX-Video 2B 0.9.8 distilled](https://huggingface.co/Lightricks/LTX-Video), using pinned file hashes, BF16 and sequential CPU offload. No prompt enhancer or upscaler is loaded. A 17-frame observed prefix predicts the next 10/20/50 frames. Advertised presets are 384×256 and a 288×192 fallback. Local generation remains disabled until three consecutive 50-frame development runs pass the real hardware gate. Memory fit, latency and physical accuracy are **not yet verified** on the RTX 5050.
+
+```powershell
+python -m nwm video-check --config configs/app.json
+python -m pip install -e ".[video]"
+python -m nwm video-download --config configs/app.json
+python -m nwm video-feasibility --config configs/app.json --prefix dev1/prefix.npz --prefix dev2/prefix.npz --prefix dev3/prefix.npz --output D:/NeuralWorldModel/models/ltx-2b-0.9.8/feasibility.json
+```
+
+The assets require about **23.65 GiB**, plus temporary/output space. The last local preflight refused the download because it would violate the 8 GiB free-space reserve. Add free space or choose a larger managed drive before downloading. The preflight report records exact byte counts. Stop training before the GPU feasibility test; its wall-clock watchdog terminates and reaps timed-out processes.
+
+For a separate GPU machine, select **Export notebook job** in Forecast/Backtest and use [the manual video notebook](notebooks/video_job.ipynb). Download the prepared job, run the notebook yourself, then import its result into the same waiting job. The exchange contains only the prefix and job identity; recorded targets remain local. Imports verify job ID, revision, prefix, seed, dimensions and checksum. Runtime selection and billing remain manual; no cloud runtime has been started for this feature. CUDA BF16 is required, so a T4 is unsupported by this adapter.
+
+### Public evaluation mini set
+
+```powershell
+python -m nwm prepare-real-data --config configs/app.json
+python -m nwm prepare-real-data --config configs/app.json --download
+python -m nwm benchmark-video --config configs/app.json --manifest D:/NeuralWorldModel/datasets/physics-iq-mini/manifest.json --output D:/NeuralWorldModel/evaluation/physics-iq-mini --split test
+```
+
+This adapter selects three development and eight test scenarios from [Physics-IQ Original](https://github.com/google-deepmind/physics-IQ-benchmark), using SHA256 scenario-name ordering, center view and take 1. GCS object generations and checksums pin the downloads. The first command records metadata; downloading is explicit. Source clips are normalized to at most 30 seconds at 384×256/16 FPS. Only the 17 samples ending at t=3 seconds condition each 50-frame rollout. The development split is for hardware feasibility; test clips never train, select or calibrate the model. Results compare pixel MSE against frame holding with one seed, not an official Physics-IQ score or a best-of-N result. The upstream dataset is CC BY 4.0; retain its manifest attribution when sharing clips.
+
+Run `python -m pytest` and `npm test`/`npm run build` in `frontend` to check the pipeline and app. CI runs Python 3.11 CPU tests and the frontend checks. Windows production validation also covers dataset-free inference, request bounds, queue isolation, crash recovery, notebook identity, causal sampling and hostile array headers. Actual large-model inference and the public mini benchmark remain pending the storage and hardware gate.
+
 ## Run locally
 
 On Windows, double-click `run.bat` (or the **Neural World Model** desktop shortcut) to run the smoke experiment and open its results folder. The launcher uses the project virtual environment, resumes saved training, and stops if any step fails. Run `run.bat full` from a terminal for the full experiment, or `run.bat --help` for usage.
@@ -12,7 +71,7 @@ Python **3.11 or 3.12** is recommended. From the project folder in PowerShell:
 py -3.11 -m venv .venv
 .\.venv\Scripts\python -m pip install --upgrade pip
 .\.venv\Scripts\python -m pip install torch --index-url https://download.pytorch.org/whl/cu128
-.\.venv\Scripts\python -m pip install -e ".[dev,notebook]"
+.\.venv\Scripts\python -m pip install -e ".[dev,notebook,app,app-test]"
 .\.venv\Scripts\python -m nwm check-device --device cuda
 .\.venv\Scripts\python -m nwm generate --config configs/smoke.json
 .\.venv\Scripts\python -m nwm train --config configs/smoke.json --device auto
@@ -24,6 +83,8 @@ py -3.11 -m venv .venv
 The CUDA 12.8 wheels support the local RTX 5050 generation. Choose a compatible official wheel for other hardware using the [PyTorch installer](https://pytorch.org/get-started/locally/). CPU mode works for tests and small experiments. `check-device` executes forward and backward kernels, rather than checking availability alone. A system CUDA toolkit is not required for prebuilt wheels.
 
 The tested Windows/Python 3.12 dependency versions are recorded in `requirements/windows-cu128-py312.txt`. The package supports Python 3.11+, and Colab uses its own compatible runtime.
+
+Configuration files may be stored anywhere. Relative `data.root` and `outputs.root` paths always resolve against this source tree; explicit absolute paths are preserved.
 
 The smoke configuration deliberately trains for only 2 perception epochs, 2 decoder epochs, and 3 dynamics epochs on 32 episodes. It verifies the pipeline and produces **undertrained demonstration artifacts**, not research performance claims. It still runs all three dynamics seeds, the full 50-frame rollout, every OOD condition, action ablations, and independent calibration.
 
@@ -37,9 +98,11 @@ python -m nwm train --config configs/full.json --stage hybrid --seed 0 --resume
 python tools/make_colab_bundle.py --config configs/full.json --include-artifacts
 ```
 
-The bundle excludes the virtual environment and includes source, the notebook, and optionally the selected dataset and run. Upload it using the first cell of [the notebook](notebooks/neural_world_model.ipynb). In Colab, select a GPU runtime and run the notebook. Existing compatible PyTorch is retained. Paths resolve relative to the source tree, so bundled checkpoints work on Windows and Linux. [Free Colab GPU availability and runtime limits vary](https://research.google.com/colaboratory/faq.html).
+The bundle excludes the virtual environment and includes source, the notebook, and optionally the selected dataset and run. Upload it using the first cell of [the notebook](notebooks/neural_world_model.ipynb). If that picker is unavailable, upload `nwm_colab.zip` through Colab's Files sidebar and rerun the first cell. In Colab, select a GPU runtime and run the notebook. Existing compatible PyTorch is retained. Paths resolve relative to the source tree, so bundled checkpoints work on Windows and Linux. [Free Colab GPU availability and runtime limits vary](https://research.google.com/colaboratory/faq.html).
 
 Each epoch saves optimizer state, selected weights, Python/NumPy/Torch RNG states, and history. `--resume` continues from the last complete epoch. Exact continuation is tested on the same backend and configuration; different GPU architectures can introduce numerical differences. Epoch budgets may be extended, but that changes curriculum scheduling. If the selected perception checkpoint changes, existing dynamics checkpoints are rejected because their inputs have changed. Use a new run directory for a new experiment. Dataset identity and checkpoint compatibility are validated before reuse.
+
+Perception checkpoints now use normalized position-and-velocity error for selection. Older checkpoints selected only by position remain usable for inference, but cannot resume perception training under the new criterion. Preserve the old run and use a new `outputs.root` to retrain all stages; do not mix a new estimator with old dynamics weights.
 
 ## Models and experiment
 
@@ -74,6 +137,8 @@ prediction = predictor.predict(context_frames, context_actions, future_actions)
 
 Inputs are `[B,4,3,64,64]` RGB frames (float `[0,1]` or uint8), `[B,3,2]` past impulses, and `[B,H,2]` future impulses for `1 <= H <= 50`. The first future impulse advances the last context frame. Zero impulses represent no intervention. Outputs include states `[B,H,3,4]`, frames `[B,H,3,64,64]`, ensemble members `[B,M,H,3,4]`, and radial position spread `[B,H,3]` in world units. Multiply distances by 64 for pixels. `WorldModelPredictor` exposes the same three-input method for an individual predictor. Future states and contact labels are never inference inputs.
 
+Inference needs the configuration, selected checkpoints, and `fitted_physics.json`; dataset archives are not required. Training, evaluation, and demonstration commands still validate their datasets before use.
+
 ## Results and interpretation
 
 Artifacts live under `runs/<configuration>/`:
@@ -96,4 +161,4 @@ Uncertainty comes from three hybrid dynamics seeds conditional on shared percept
 
 The no-action ablation zeros only future impulses and retains the same targets and observed history. Scientific completion means reporting the comparison honestly, including failures; hybrid improvement is a hypothesis.
 
-Real camera footage, unknown object identities or geometry, variable object counts, policy learning, and interactive apps are outside v1.
+The synthetic research track does not handle real camera footage, unknown object identities or geometry, variable object counts or policy learning. The separate experimental video adapter generates continuations without claiming those scientific capabilities.

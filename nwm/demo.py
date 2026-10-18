@@ -9,7 +9,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 import torch
 
-from .data import EpisodeDataset
+from .data import EpisodeDataset, validate_dataset
 from .evaluation import rollout_predictions
 from .physics import PhysicsConfig, render_states
 
@@ -53,6 +53,7 @@ def _save_video(frames: list[np.ndarray], destination: Path, fps: int = 30) -> t
 def make_demo(config: dict, device: str = "auto") -> Path:
     from .training import load_artifacts
 
+    validate_dataset(config)
     artifacts = load_artifacts(config, device)
     cfg = PhysicsConfig(**config["physics"])
     horizon = max(config["evaluation"]["horizons"])

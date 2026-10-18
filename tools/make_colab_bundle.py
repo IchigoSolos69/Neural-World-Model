@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--output", default="nwm_colab.zip")
     args = parser.parse_args()
     config = load_config(ROOT / args.config)
-    sources = [ROOT / name for name in ("nwm", "configs", "notebooks", "tools", "tests", "requirements")]
+    sources = [ROOT / name for name in ("nwm", "configs", "notebooks", "tools", "tests", "requirements", "frontend")]
     sources += [ROOT / name for name in ("README.md", "pyproject.toml", ".gitignore", "run.bat")]
     if args.include_artifacts:
         sources.extend(Path(config[section]["root"]).resolve() for section in ("data", "outputs"))
@@ -26,7 +26,8 @@ def main():
         if not source.exists():
             continue
         for path in source.rglob("*") if source.is_dir() else [source]:
-            if path.is_file() and "__pycache__" not in path.parts and path.suffix not in (".pyc", ".partial"):
+            if (path.is_file() and not {"__pycache__", "node_modules"}.intersection(path.parts)
+                    and path.suffix not in (".pyc", ".partial", ".tsbuildinfo")):
                 if not path.resolve().is_relative_to(ROOT):
                     raise ValueError(f"Bundle inputs must be inside the project: {path}")
                 paths.add(path)

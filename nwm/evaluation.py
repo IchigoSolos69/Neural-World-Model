@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
-from .data import EpisodeDataset, OOD_CONDITIONS
+from .data import EpisodeDataset, OOD_CONDITIONS, validate_dataset
 from .metrics import (RolloutMetrics, collision_counts, conformal_multiplier,
                       infer_contacts, uncertainty_metrics)
 from .physics import PhysicsConfig
@@ -156,6 +156,7 @@ def _plot(records: list[dict], destination: Path) -> None:
 def evaluate(config: dict, device: str = "auto") -> Path:
     from .training import load_artifacts
 
+    validate_dataset(config)
     artifacts = load_artifacts(config, device)
     cfg = PhysicsConfig(**config["physics"])
     horizons = config["evaluation"]["horizons"]

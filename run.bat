@@ -3,6 +3,7 @@ setlocal
 title Neural World Model
 
 if /i "%~1"=="--help" goto :help
+if /i "%~1"=="app" goto :app
 set "NWM_MODE=smoke"
 if not "%~1"=="" set "NWM_MODE=%~1"
 if /i "%NWM_MODE%"=="smoke" goto :run
@@ -23,11 +24,7 @@ echo.
 
 "%NWM_PYTHON%" -u -m nwm generate --config "configs\%NWM_MODE%.json"
 if errorlevel 1 goto :failed
-"%NWM_PYTHON%" -u -m nwm train --config "configs\%NWM_MODE%.json" --device auto --resume
-if errorlevel 1 goto :failed
-"%NWM_PYTHON%" -u -m nwm evaluate --config "configs\%NWM_MODE%.json" --device auto
-if errorlevel 1 goto :failed
-"%NWM_PYTHON%" -u -m nwm demo --config "configs\%NWM_MODE%.json" --device auto
+"%NWM_PYTHON%" -u -m nwm run-experiment --config "configs\%NWM_MODE%.json" --device auto --resume
 if errorlevel 1 goto :failed
 
 echo.
@@ -51,7 +48,17 @@ exit /b 1
 
 :help
 echo Neural World Model launcher
-echo Usage: run.bat [smoke^|full]
+echo Usage: run.bat [app^|smoke^|full]
 echo Default: smoke. Existing training checkpoints are resumed.
 echo Full training can take substantial time. Results open when complete.
+exit /b 0
+
+:app
+pushd "%~dp0"
+if errorlevel 1 exit /b 1
+echo Starting the local app at http://127.0.0.1:8000
+echo Keep this window open while using the app. Press Ctrl+C to stop.
+"%~dp0.venv\Scripts\python.exe" -m nwm serve --config configs\app.json --open-browser
+if errorlevel 1 goto :failed
+popd
 exit /b 0

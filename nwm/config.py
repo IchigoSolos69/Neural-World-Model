@@ -11,7 +11,7 @@ def load_config(path: str | Path) -> dict:
     path = Path(path).resolve()
     with path.open(encoding="utf-8") as stream:
         config = json.load(stream)
-    root = path.parent.parent
+    root = Path(__file__).resolve().parents[1]
     for section in ("data", "outputs"):
         value = Path(config[section]["root"])
         config[section]["root"] = str(value if value.is_absolute() else root / value)

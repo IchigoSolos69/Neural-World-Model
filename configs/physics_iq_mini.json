@@ -1,0 +1,101 @@
+{
+  "format": 1,
+  "dataset": "Physics-IQ Original mini",
+  "source": "https://github.com/google-deepmind/physics-IQ-benchmark",
+  "license": "CC BY 4.0 (dataset); Apache 2.0 (upstream software)",
+  "selection": "SHA256 scenario-name order; center perspective, take 1; first 3 development, next 8 test",
+  "conditioning": "17 observed samples at 16 FPS ending at t=3s; next 50 frames withheld",
+  "interpretation": "Truncated custom mini evaluation; not an official Physics-IQ score. No training or best-of-N selection.",
+  "download_bytes": 39720087,
+  "entries": [
+    {
+      "name": "full-videos/take-1/16FPS/0050_full-videos_16FPS_perspective-center_take-1_trimmed-dominos-with-space.mp4",
+      "generation": "1733760378863172",
+      "size": "4342309",
+      "md5Hash": "Fzvy6E1cMhv7Wr0f4/MV5A==",
+      "scenario_id": "dominos-with-space",
+      "split": "development"
+    },
+    {
+      "name": "full-videos/take-1/16FPS/0062_full-videos_16FPS_perspective-center_take-1_trimmed-duck-static.mp4",
+      "generation": "1733760317896871",
+      "size": "1733274",
+      "md5Hash": "6TTFfSiQNQKyqdd+ihJ3XQ==",
+      "scenario_id": "duck-static",
+      "split": "development"
+    },
+    {
+      "name": "full-videos/take-1/16FPS/0044_full-videos_16FPS_perspective-center_take-1_trimmed-cut-paper.mp4",
+      "generation": "1733760379500433",
+      "size": "5842898",
+      "md5Hash": "r6mM+HBPcxpYeeXBfi9w4Q==",
+      "scenario_id": "cut-paper",
+      "split": "development"
+    },
+    {
+      "name": "full-videos/take-1/16FPS/0071_full-videos_16FPS_perspective-center_take-1_trimmed-juice-in-water.mp4",
+      "generation": "1733760338333879",
+      "size": "4289305",
+      "md5Hash": "6RT/U99IaPNHg+EFPBnPdg==",
+      "scenario_id": "juice-in-water",
+      "split": "test"
+    },
+    {
+      "name": "full-videos/take-1/16FPS/0086_full-videos_16FPS_perspective-center_take-1_trimmed-liquid-on-duck.mp4",
+      "generation": "1733760337336678",
+      "size": "5205480",
+      "md5Hash": "qCTseVE8SScgazDKcExZvQ==",
+      "scenario_id": "liquid-on-duck",
+      "split": "test"
+    },
+    {
+      "name": "full-videos/take-1/16FPS/0107_full-videos_16FPS_perspective-center_take-1_trimmed-marble-run-y.mp4",
+      "generation": "1733760357530686",
+      "size": "2091326",
+      "md5Hash": "HrGOxbah+yvqjUXXhs0LsQ==",
+      "scenario_id": "marble-run-y",
+      "split": "test"
+    },
+    {
+      "name": "full-videos/take-1/16FPS/0092_full-videos_16FPS_perspective-center_take-1_trimmed-lit-candle.mp4",
+      "generation": "1733760339010527",
+      "size": "2833766",
+      "md5Hash": "AECfugFEwBVpRHXt/Y23/Q==",
+      "scenario_id": "lit-candle",
+      "split": "test"
+    },
+    {
+      "name": "full-videos/take-1/16FPS/0155_full-videos_16FPS_perspective-center_take-1_trimmed-rolling-reflection.mp4",
+      "generation": "1733760351685717",
+      "size": "2111726",
+      "md5Hash": "gths7Upx5dTr891tN8V63w==",
+      "scenario_id": "rolling-reflection",
+      "split": "test"
+    },
+    {
+      "name": "full-videos/take-1/16FPS/0167_full-videos_16FPS_perspective-center_take-1_trimmed-smiley-ball-rotates.mp4",
+      "generation": "1733760377376750",
+      "size": "4053193",
+      "md5Hash": "cMwz+ZED1RYPfXnpqSdozA==",
+      "scenario_id": "smiley-ball-rotates",
+      "split": "test"
+    },
+    {
+      "name": "full-videos/take-1/16FPS/0104_full-videos_16FPS_perspective-center_take-1_trimmed-marble-run-x.mp4",
+      "generation": "1733760321334301",
+      "size": "2279234",
+      "md5Hash": "iqh9SbtaifUJLhUgJ5MsVQ==",
+      "scenario_id": "marble-run-x",
+      "split": "test"
+    },
+    {
+      "name": "full-videos/take-1/16FPS/0152_full-videos_16FPS_perspective-center_take-1_trimmed-roll-in-box.mp4",
+      "generation": "1733760367011002",
+      "size": "4937576",
+      "md5Hash": "Pu8oWJwz1PTQHgeB4M5PyQ==",
+      "scenario_id": "roll-in-box",
+      "split": "test"
+    }
+  ],
+  "catalog_recorded_on": "2026-10-18"
+}

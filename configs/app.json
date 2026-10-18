@@ -1,0 +1,13 @@
+{
+  "root": "D:/NeuralWorldModel",
+  "limit_gib": 27,
+  "reserve_gib": 8,
+  "device": "cpu",
+  "port": 8000,
+  "timeout_seconds": 1200,
+  "queue_limit": 4,
+  "bundles": [
+    {"id": "full", "path": "D:/NeuralWorldModel/bundles/full"},
+    {"id": "smoke", "path": "D:/NeuralWorldModel/bundles/smoke"}
+  ]
+}

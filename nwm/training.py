@@ -145,6 +145,7 @@ def _batch_loss(model, batch, stage, device, radius, horizon, training, residual
         prediction = model(frames, batch["context_actions"].to(device))
         target = batch["initial_state"].to(device)
         loss = normalized_state_loss(prediction, target)
+        return loss, loss
     elif stage == "decoder":
         candidates = torch.cat((batch["context_states"], batch["target_states"]), dim=1).to(device)
         indices = (torch.randint(candidates.shape[1], (len(candidates),), device=device) if training else
@@ -170,6 +171,7 @@ def _fit_stage(config, model, stage, seed, train_set, validation_set, device, re
     tag = f"{stage}_{seed}" if stage in ("learned", "hybrid") else stage
     directory = Path(config["outputs"]["root"]) / "checkpoints"
     latest_path, best_path = directory / f"{tag}_latest.pt", directory / f"{tag}_best.pt"
+    selection_metric = {"perception": "normalized_state_mse", "decoder": "pixel_mse"}.get(stage, "position_rmse_px")
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=settings["learning_rate"])
     start, best, stale, history, best_state, best_epoch = 0, math.inf, 0, [], None, -1
@@ -177,6 +179,8 @@ def _fit_stage(config, model, stage, seed, train_set, validation_set, device, re
         if not resume:
             raise FileExistsError(f"{latest_path} exists; pass --resume or use another outputs.root")
         previous = _load_checkpoint(latest_path, config)
+        if stage == "perception" and previous.get("selection_metric") != selection_metric:
+            raise ValueError("Perception checkpoint uses an incompatible selection metric; choose a new outputs.root to retrain")
         if previous.get("perception_hash") != perception_hash:
             raise ValueError(f"{tag} used a different perception checkpoint; choose a new outputs.root")
         model.load_state_dict(previous["model"])
@@ -220,7 +224,7 @@ def _fit_stage(config, model, stage, seed, train_set, validation_set, device, re
                 validation += metric.item() * size
                 val_count += size
         value = validation / val_count
-        value = math.sqrt(value) if stage != "decoder" else value
+        value = math.sqrt(value) if stage in ("learned", "hybrid") else value
         if not math.isfinite(value):
             raise RuntimeError(f"Nonfinite validation metric in {tag}")
         improved = value < best
@@ -231,11 +235,12 @@ def _fit_stage(config, model, stage, seed, train_set, validation_set, device, re
         row = {"epoch": epoch + 1, "horizon": horizon, "loss": total / count,
                "validation": value, "seconds": round(time.monotonic() - began, 3)}
         history.append(row)
-        print(f"{tag} epoch {epoch + 1}/{epochs} horizon={horizon}: loss={row['loss']:.5f}, val={value:.5f}", flush=True)
+        print(f"{tag} epoch {epoch + 1}/{epochs} horizon={horizon}: loss={row['loss']:.5f}, val[{selection_metric}]={value:.5f}", flush=True)
         # Give every dynamics model time in all three curriculum stages.
         stopped = stale >= settings["patience"] and (stage not in ("learned", "hybrid") or horizon == 20)
         checkpoint = {"format": 1, "signature": experiment_signature(config), "config": config,
                       "stage": stage, "seed": seed, "epoch": epoch, "best_metric": best,
+                      "selection_metric": selection_metric,
                       "stale": stale, "stopped_early": stopped, "history": history,
                       "model": state, "best_model": best_state, "best_epoch": best_epoch,
                       "perception_hash": perception_hash,
@@ -330,7 +335,6 @@ def train(config, device="auto", stage="all", resume=False, seeds=None):
 
 
 def load_artifacts(config, device="auto"):
-    validate_dataset(config)
     device = resolve_device(device)
     torch.set_num_threads(config["training"].get("cpu_threads", 4))
     root = Path(config["outputs"]["root"])
