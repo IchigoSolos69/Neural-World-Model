@@ -18,6 +18,33 @@ def test_curriculum_contains_all_stages():
     assert [curriculum_horizon(epoch, 6) for epoch in range(6)] == [1, 1, 10, 10, 20, 20]
 
 
+@pytest.mark.parametrize("locked_attempts", [2, 5])
+def test_atomic_checkpoint_replace_retries_without_losing_previous_file(tmp_path, monkeypatch, locked_attempts):
+    import nwm.training as training
+    path = tmp_path / "checkpoint.pt"
+    training._atomic_save({"value": 1}, path)
+    original_bytes = path.read_bytes()
+    replace = training.os.replace
+    attempts, delays = [], []
+    def temporarily_locked(source, destination):
+        attempts.append(1)
+        if len(attempts) <= locked_attempts:
+            assert path.read_bytes() == original_bytes
+            raise PermissionError("temporary Windows file lock")
+        return replace(source, destination)
+    monkeypatch.setattr(training.os, "replace", temporarily_locked)
+    monkeypatch.setattr("nwm.files.sleep", delays.append)
+    if locked_attempts == 5:
+        with pytest.raises(PermissionError):
+            training._atomic_save({"value": 2}, path)
+        assert path.read_bytes() == original_bytes
+        assert len(attempts) == 5 and len(delays) == 4
+    else:
+        training._atomic_save({"value": 2}, path)
+        assert torch.load(path, weights_only=True) == {"value": 2}
+        assert len(attempts) == 3 and delays == [.02, .04]
+
+
 def test_config_resolves_paths_and_rejects_short_episodes(tmp_path):
     config = load_config("configs/smoke.json")
     assert Path(config["data"]["root"]).is_absolute()
@@ -63,8 +90,9 @@ class TinyDynamics(nn.Module):
 
 
 @pytest.mark.parametrize("interrupt_suffix", ["latest.pt", "best.pt"])
+@pytest.mark.parametrize("legacy_metrics", [False, True])
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable"))])
-def test_epoch_boundary_resume_matches_uninterrupted(tmp_path, monkeypatch, interrupt_suffix, device):
+def test_epoch_boundary_resume_matches_uninterrupted(tmp_path, monkeypatch, interrupt_suffix, legacy_metrics, device):
     config = load_config("configs/smoke.json")
     config["outputs"]["root"] = str(tmp_path / "resumed")
     config["training"].update(dynamics_epochs=3, batch_size=2, patience=20)
@@ -83,6 +111,14 @@ def test_epoch_boundary_resume_matches_uninterrupted(tmp_path, monkeypatch, inte
         patch.setattr(training, "_atomic_save", interrupt_after_first_best)
         with pytest.raises(KeyboardInterrupt):
             _fit_stage(config, model, "learned", 17, dataset, dataset, device, False)
+    if legacy_metrics:
+        for path in (tmp_path / "resumed/checkpoints").glob("*.pt"):
+            checkpoint = torch.load(path, weights_only=True)
+            del checkpoint["position_rmse_definition"]
+            checkpoint["best_metric"] /= 2 ** 0.5
+            for row in checkpoint["history"]:
+                row["validation"] /= 2 ** 0.5
+            torch.save(checkpoint, path)
     resumed = _fit_stage(config, TinyDynamics(), "learned", 17, dataset, dataset, device, True)
     seed_everything(17)
     config["outputs"]["root"] = str(tmp_path / "continuous")
@@ -91,6 +127,13 @@ def test_epoch_boundary_resume_matches_uninterrupted(tmp_path, monkeypatch, inte
     resume_checkpoint = torch.load(tmp_path / "resumed/checkpoints/learned_17_latest.pt", weights_only=True)
     full_checkpoint = torch.load(tmp_path / "continuous/checkpoints/learned_17_latest.pt", weights_only=True)
     assert [row["loss"] for row in resume_checkpoint["history"]] == [row["loss"] for row in full_checkpoint["history"]]
+    assert [row["validation"] for row in resume_checkpoint["history"]] == pytest.approx(
+        [row["validation"] for row in full_checkpoint["history"]])
+    assert resume_checkpoint["best_epoch"] == full_checkpoint["best_epoch"]
+    assert resume_checkpoint["position_rmse_definition"] == "euclidean_position_rmse_px_v1"
+    torch.testing.assert_close(resume_checkpoint["rng"]["torch"], full_checkpoint["rng"]["torch"], rtol=0, atol=0)
+    for key, value in resume_checkpoint["optimizer"]["state"][0].items():
+        torch.testing.assert_close(value, full_checkpoint["optimizer"]["state"][0][key], rtol=0, atol=0)
     with pytest.raises(ValueError, match="different perception"):
         _fit_stage(config, TinyDynamics(), "learned", 17, dataset, dataset, device, True,
                    perception_hash="retrained-perception")

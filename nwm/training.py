@@ -18,7 +18,10 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from .config import experiment_signature
+from .files import replace_file
 from .data import EpisodeDataset, validate_dataset
+from .metric_definitions import (POSITION_RMSE_DEFINITION, normalize_checkpoint_metrics,
+                                 position_squared_error)
 from .models import HybridDynamics, LearnedDynamics, StateDecoder, StateEstimator
 from .physics import PhysicsConfig, render_states
 
@@ -78,14 +81,14 @@ def _atomic_save(value, path):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".partial.pt")
     torch.save(value, temporary)
-    os.replace(temporary, path)
+    replace_file(temporary, path)
 
 
 def _load_checkpoint(path, config):
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     if checkpoint.get("signature") != experiment_signature(config):
         raise ValueError(f"Checkpoint {path} belongs to a different experiment; choose another outputs.root")
-    return checkpoint
+    return normalize_checkpoint_metrics(checkpoint, path)
 
 
 def _model_hash(model):
@@ -161,7 +164,7 @@ def _batch_loss(model, batch, stage, device, radius, horizon, training, residual
         loss = normalized_state_loss(prediction, target)
         if stage == "hybrid" and training:
             loss = loss + residual_weight * model.last_residual.square().mean()
-    position_mse = ((prediction[..., :2] - target[..., :2]) * 64).square().mean()
+    position_mse = position_squared_error(prediction, target).mean()
     return loss, position_mse
 
 
@@ -245,6 +248,8 @@ def _fit_stage(config, model, stage, seed, train_set, validation_set, device, re
                       "model": state, "best_model": best_state, "best_epoch": best_epoch,
                       "perception_hash": perception_hash,
                       "optimizer": optimizer.state_dict(), "rng": _rng_state()}
+        if stage in ("learned", "hybrid"):
+            checkpoint["position_rmse_definition"] = POSITION_RMSE_DEFINITION
         _atomic_save(checkpoint, latest_path)
         if improved:
             _atomic_save(checkpoint, best_path)

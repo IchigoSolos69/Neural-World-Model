@@ -7,6 +7,8 @@ import math
 import numpy as np
 import torch
 
+from .metric_definitions import position_squared_error
+
 
 def _segment_distance(start: torch.Tensor, end: torch.Tensor) -> torch.Tensor:
     delta = end - start
@@ -130,7 +132,7 @@ class RolloutMetrics:
             raise ValueError("Rollouts must have matching [batch, time, 3, 4] shapes")
         if not torch.isfinite(states).all():
             raise ValueError("Prediction contains nonfinite states")
-        position_sq = (states[..., :2] - target[..., :2]).square().sum(-1)
+        position_sq = position_squared_error(states, target, image_size=1)
         velocity_sq = (states[..., 2:] - target[..., 2:]).square().sum(-1)
         outside = ((states[..., :2] < self.radius - 1e-5) |
                    (states[..., :2] > 1 - self.radius + 1e-5)).any(-1)

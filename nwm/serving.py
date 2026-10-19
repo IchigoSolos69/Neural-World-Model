@@ -16,6 +16,7 @@ import tempfile
 import torch
 
 from .config import experiment_signature
+from .metric_definitions import POSITION_RMSE_DEFINITION, normalize_checkpoint_metrics, position_squared_error
 from .models import HybridDynamics, LearnedDynamics, StateDecoder, StateEstimator
 from .physics import PhysicsConfig
 from .predict import EnsemblePredictor, WorldModelPredictor, constant_velocity_rollout, physics_rollout
@@ -25,6 +26,63 @@ from .training import _load_checkpoint, _model_hash, load_artifacts, resolve_dev
 def _checksum(path):
     with Path(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def _verified_files(root, declared, expected=None):
+    if not isinstance(declared, dict) or not declared or (expected is not None and set(declared) != expected):
+        raise ValueError("Research evidence contains incomplete file hashes")
+    root = Path(root).resolve(strict=True)
+    for name, checksum in declared.items():
+        relative = Path(name)
+        if (not name or relative.is_absolute() or relative.drive or ".." in relative.parts
+                or not isinstance(checksum, str) or len(checksum) != 64
+                or any(char not in "0123456789abcdef" for char in checksum)):
+            raise ValueError("Research evidence contains an invalid file path or SHA256")
+        path = root / relative
+        if (not path.resolve().is_relative_to(root) or any(parent.is_symlink() for parent in (path, *path.parents))
+                or not path.is_file() or _checksum(path) != checksum):
+            raise ValueError(f"Research evidence file hash mismatch: {name}")
+
+
+def _research_evidence(config, evaluation):
+    directory = Path(evaluation).resolve(strict=True)
+    path = directory / "evidence.json"
+    if path.is_symlink():
+        raise ValueError("Research evidence cannot be a symbolic link")
+    evidence = json.loads(path.read_text(encoding="utf-8"))
+    if evidence.get("complete") is not True or evidence.get("metric_definition") != POSITION_RMSE_DEFINITION:
+        raise ValueError("Research evidence must be complete and use the standard position RMSE")
+    provenance = evidence.get("provenance", {})
+    if provenance.get("experiment_signature") != experiment_signature(config):
+        raise ValueError("Research evidence belongs to another experiment")
+    files = evidence.get("files", {})
+    if not {"metrics.json", "calibration.json"}.issubset(files):
+        raise ValueError("Research evidence must bind metrics and calibration files")
+    _verified_files(directory, files)
+    source = Path(config["outputs"]["root"])
+    checkpoint_root = source / "checkpoints"
+    expected_checkpoints = {item.name for pattern in ("*_best.pt", "*_latest.pt")
+                            for item in checkpoint_root.glob(pattern)}
+    required_best = {"perception_best.pt", "decoder_best.pt"} | {
+        f"{kind}_{seed}_best.pt" for kind in ("learned", "hybrid") for seed in config["training"]["seeds"]}
+    if not required_best.issubset(expected_checkpoints):
+        raise ValueError("Research evidence source is missing selected checkpoints")
+    _verified_files(checkpoint_root, provenance.get("checkpoints"), expected_checkpoints)
+    data_root = Path(config["data"]["root"])
+    expected_data = {"metadata.json"} | {item.name for item in data_root.glob("*.npz")}
+    if not {"train.npz", "validation.npz", "calibration.npz", "test.npz"}.issubset(expected_data):
+        raise ValueError("Research evidence requires all source dataset splits")
+    _verified_files(data_root, provenance.get("dataset_files"), expected_data)
+    fingerprint = json.loads((data_root / "metadata.json").read_text(encoding="utf-8")).get("fingerprint")
+    if not fingerprint or provenance.get("dataset_fingerprint") != fingerprint:
+        raise ValueError("Research evidence dataset fingerprint mismatch")
+    if provenance.get("fitted_physics_sha256") != _checksum(source / "fitted_physics.json"):
+        raise ValueError("Research evidence fitted physics hash mismatch")
+    binding = {"evidence_sha256": _checksum(path), "metrics_sha256": files["metrics.json"],
+               "metric_definition": POSITION_RMSE_DEFINITION}
+    if "primary_comparison" in evidence:
+        binding["primary_comparison"] = evidence["primary_comparison"]
+    return evidence, binding
 
 
 def _calibration(value):
@@ -64,9 +122,11 @@ def calibrated_radii(position_spread, calibration):
 def _select_default(config, artifacts, checkpoints):
     """Compare every predictor on validation when source episodes are available."""
     if not (Path(config["data"]["root"]) / "validation.npz").exists():
-        candidates = {name: ckpt["best_metric"] for name, ckpt in checkpoints.items()}
+        candidates = {name: normalize_checkpoint_metrics(ckpt, name)["best_metric"]
+                      for name, ckpt in checkpoints.items()}
         return min(candidates, key=lambda name: (candidates[name], name)), {
             "split": "validation", "metric": "position_rmse_px", "horizon": 20,
+            "position_rmse_definition": POSITION_RMSE_DEFINITION,
             "candidates": candidates, "candidate_scope": "trained_single_seed_models",
             "note": "Source validation episodes unavailable; selection uses saved checkpoint validation metrics."}
     from torch.utils.data import DataLoader
@@ -80,18 +140,19 @@ def _select_default(config, artifacts, checkpoints):
         initial = artifacts["estimator"](batch["context_frames"], batch["context_actions"])
         for prediction in rollout_predictions(artifacts, initial, batch["future_actions"], PhysicsConfig(**config["physics"])):
             name = prediction["model"] if prediction["seed"] is None else f"{prediction['model']}_{prediction['seed']}"
-            error = (prediction["states"][..., :2] - batch["target_states"][..., :2]).square().sum(-1)
+            error = position_squared_error(prediction["states"], batch["target_states"])
             totals[name] = totals.get(name, 0.0) + float(error.sum())
         count += batch["target_states"].shape[0] * 20 * 3
-    candidates = {name: math.sqrt(total / count) * 64 for name, total in totals.items()}
+    candidates = {name: math.sqrt(total / count) for name, total in totals.items()}
     if not candidates or any(not math.isfinite(metric) for metric in candidates.values()):
         raise ValueError("Validation selection did not produce finite model errors")
     return min(candidates, key=lambda name: (candidates[name], name)), {
         "split": "validation", "initialization": "estimated", "metric": "position_rmse_px",
+        "position_rmse_definition": POSITION_RMSE_DEFINITION,
         "horizon": 20, "episodes": len(dataset), "candidates": candidates, "candidate_scope": "all_predictors"}
 
 
-def export_serving(config, output):
+def export_serving(config, output, evaluation=None):
     """Atomically publish an immutable directory; never replace an existing bundle."""
     requested = Path(output)
     if ".." in requested.parts or requested.name in ("", ".", ".."):
@@ -113,11 +174,13 @@ def export_serving(config, output):
         seeds = config["training"]["seeds"]
         if len(seeds) != 3 or len(set(seeds)) != 3:
             raise ValueError("Serving requires three independently seeded dynamics members")
+        evidence, binding = _research_evidence(config, evaluation) if evaluation is not None else (None, None)
         artifacts = load_artifacts(config, "cpu")
         root = Path(config["outputs"]["root"])
-        calibration = _calibration(json.loads((root / "evaluation/calibration.json").read_text(encoding="utf-8")))
-        calibration_verified = (Path(config["data"]["root"]) / "calibration.npz").is_file()
-        if calibration_verified:
+        calibration_path = Path(evaluation) / "calibration.json" if evidence else root / "evaluation/calibration.json"
+        calibration = _calibration(json.loads(calibration_path.read_text(encoding="utf-8")))
+        calibration_verified = evidence is not None or (Path(config["data"]["root"]) / "calibration.npz").is_file()
+        if calibration_verified and evidence is None:
             from .evaluation import calibrate
             calibration = _calibration(calibrate(config, artifacts))
         checkpoints = {}
@@ -140,6 +203,9 @@ def export_serving(config, output):
         models = {"estimator": artifacts["estimator"], "decoder": artifacts["decoder"]}
         models.update({f"{kind}_{seed}": model for kind in ("learned", "hybrid")
                        for seed, model in artifacts[kind]})
+        model_hashes = {name: _model_hash(model) for name, model in models.items()}
+        if evidence is not None and evidence["provenance"].get("model_hashes") != model_hashes:
+            raise ValueError("Research evidence model fingerprints differ from the selected checkpoints")
         for name, model in models.items():
             torch.save({key: tensor.detach().cpu() for key, tensor in model.state_dict().items()}, temporary / f"{name}.pt")
         (temporary / "calibration.json").write_text(json.dumps(calibration, indent=2, allow_nan=False), encoding="utf-8")
@@ -159,16 +225,21 @@ def export_serving(config, output):
                 training_complete = False
                 break
         manifest = {"format_version": 1, "architecture": "nwm-fixed-three-discs-v1",
+                    "position_rmse_definition": POSITION_RMSE_DEFINITION,
                     "experiment_signature": experiment_signature(config), "config": portable,
                     "experiment_size": "full" if full and training_complete else "full_partial" if full else "smoke",
                     "training_complete": training_complete, "default_model": selected,
                     "selection": selection,
                     "calibration_binding": {"verified": calibration_verified,
-                                            "source": "recomputed_on_calibration_split" if calibration_verified else "source_artifact_unverified",
+                                            "source": "verified_research_evaluation" if evidence else "recomputed_on_calibration_split" if calibration_verified else "source_artifact_unverified",
                                             "model_hashes": {name: _model_hash(model) for name, model in models.items()
                                                              if name == "estimator" or name.startswith("hybrid_")}},
-                    "model_hashes": {name: _model_hash(model) for name, model in models.items()},
+                    "model_hashes": model_hashes,
                     "files": {path.name: _checksum(path) for path in temporary.iterdir()}}
+        if evidence is not None:
+            manifest["research_evidence"] = binding
+            if _research_evidence(config, evaluation)[1] != binding:
+                raise ValueError("Research evidence changed while publishing the bundle")
         (temporary / "manifest.json").write_text(json.dumps(manifest, indent=2, allow_nan=False), encoding="utf-8")
         os.rename(temporary, destination)
         temporary = None
@@ -188,6 +259,8 @@ def load_serving(path, device="auto"):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("format_version") != 1 or manifest.get("architecture") != "nwm-fixed-three-discs-v1":
         raise ValueError("Unsupported serving bundle compatibility version")
+    if manifest.get("position_rmse_definition") not in (None, POSITION_RMSE_DEFINITION):
+        raise ValueError("Unknown serving position RMSE definition")
     config = manifest["config"]
     if manifest.get("experiment_signature") != experiment_signature(config):
         raise ValueError("Serving experiment signature mismatch")

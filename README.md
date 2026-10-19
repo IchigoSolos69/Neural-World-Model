@@ -162,3 +162,38 @@ Uncertainty comes from three hybrid dynamics seeds conditional on shared percept
 The no-action ablation zeros only future impulses and retains the same targets and observed history. Scientific completion means reporting the comparison honestly, including failures; hybrid improvement is a hypothesis.
 
 The synthetic research track does not handle real camera footage, unknown object identities or geometry, variable object counts or policy learning. The separate experimental video adapter generates continuations without claiming those scientific capabilities.
+
+## Evidence-first research release
+
+Position RMSE now has one definition everywhere: `sqrt(mean(dx_px² + dy_px²))`, pooled over objects, episodes and frames through the reported horizon. Historical dynamics checkpoints used coordinate RMSE, smaller by `sqrt(2)`. Loading those checkpoints converts only validation metadata in memory and records the conversion; model weights, optimizer/RNG state and source files stay unchanged. Resumption continues with the same selected epoch and standard units. The current running process keeps its already-loaded code and is left undisturbed.
+
+Generate enhanced evidence in a **fresh** directory using existing checkpoints, without training:
+
+```powershell
+python -m nwm evaluate --config configs/smoke.json --device cpu --output runs/smoke/evaluation-evidence-v2
+python -m nwm report --evaluation runs/smoke/evaluation-evidence-v2
+```
+
+An existing `--output` directory is refused, preserving previous or interrupted evaluations. Without `--output`, evaluation retains its original output location and aggregate behavior. Enhanced evaluation freezes checkpoint/data hashes, saves compact episode archives and truth-defined contact/impulse strata, and generates `report.html`, plots, `statistical_comparisons.json`, and median/p90/worst-case videos. Gallery ranks use hybrid-ensemble 50-frame prefix RMSE, nearest-rank percentiles and episode-ID tie breaking; the learned video panel always uses the first configured seed. They are descriptive examples, never model selection.
+
+The primary comparison is hybrid ensemble minus fitted physics at 50 frames on ordinary test physics, estimated initialization and recorded actions. Negative differences favor hybrid. Confidence intervals use 2,000 paired whole-episode bootstrap resamples with seed `20261019`; each resample recomputes pooled RMSE. Comparisons across training seeds share resampled episode IDs. Seed dispersion is reported separately, and episode intervals are conditional on the trained models. Secondary comparisons are exploratory, without multiplicity correction. Small groups are flagged rather than presented as strong evidence. Per-object coverage uses 95% Wilson intervals across independent held-out episodes, remaining informative for all-covered/all-missed samples; width intervals use the episode bootstrap. Calibration remains separate, per object/horizon; changed-physics coverage is measured without recalibrating on those tests.
+
+`report` reads saved measurements only. It verifies their hashes and can regenerate HTML, JSON and figures without model weights, the source dataset, inference, or a GPU. Keep the HTML beside its JSON, `episodes/`, `gallery/` and `report_plots/` folders when moving it. Smoke reports are explicitly undertrained pipeline demonstrations.
+
+For the existing full experiment, queue one finite release after its train/evaluate/demo pipeline exits successfully:
+
+```powershell
+python -m nwm release-research --config configs/full.json --device cuda --output runs/full/evaluation-evidence-v2 --bundle D:/NeuralWorldModel/bundles/full --wait
+```
+
+This command never starts or resumes training and never uses paid cloud resources. It waits without holding the GPU lock, then freezes inputs, runs enhanced evaluation once, rebuilds the report, and exports an evidence-bound bundle. Every public predictor is compared with the source on one deterministic 50-frame validation context, including states, decoded frames and ensemble spread. The verified staging directory is renamed to the final bundle only after parity passes. The smoke bundle stays available in the app; Refresh discovers the full bundle.
+
+Release heartbeat/status, immutable `freeze.json` and `parity.json` live in the sibling `.evaluation-evidence-v2.research-release/` directory. Rerunning the same command can finish publication from complete evidence without repeating inference. Incomplete evaluations, changed inputs, unrelated existing bundles and failed original experiments are refused and preserved for inspection. A different output directory is required to intentionally repeat an incomplete evaluation.
+
+To bind an independently completed evaluation explicitly:
+
+```powershell
+python -m nwm export-serving --config configs/full.json --evaluation runs/full/evaluation-evidence-v2 --output D:/NeuralWorldModel/bundles/full
+```
+
+The fitted baseline uses the exact simulator force-law family. It may win; a hybrid improvement is not an acceptance requirement. No new force laws, architectures, datasets or training seeds are introduced by this evidence release. General-video hardware feasibility remains a separate, unverified gate.

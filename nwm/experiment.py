@@ -12,6 +12,7 @@ import sys
 import time
 
 from .config import load_config
+from .files import replace_file
 
 
 class ResourceBusyError(RuntimeError):
@@ -126,7 +127,7 @@ def _write_status(path, value):
         json.dump(value, stream, indent=2)
         stream.flush()
         os.fsync(stream.fileno())
-    os.replace(temporary, path)
+    replace_file(temporary, path)
 
 
 def run_experiment(config_path, device="cuda", resume=True):

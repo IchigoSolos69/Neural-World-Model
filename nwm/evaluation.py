@@ -17,6 +17,7 @@ from .metrics import (RolloutMetrics, collision_counts, conformal_multiplier,
                       infer_contacts, uncertainty_metrics)
 from .physics import PhysicsConfig
 from .predict import constant_velocity_rollout, physics_rollout
+from .metric_definitions import POSITION_RMSE_DEFINITION
 
 
 def rollout_predictions(artifacts: dict, initial: torch.Tensor, actions: torch.Tensor,
@@ -153,17 +154,35 @@ def _plot(records: list[dict], destination: Path) -> None:
 
 
 @torch.inference_mode()
-def evaluate(config: dict, device: str = "auto") -> Path:
+def evaluate(config: dict, device: str = "auto", output: str | Path | None = None) -> Path:
     from .training import load_artifacts
 
     validate_dataset(config)
+    enhanced = output is not None
+    frozen = None
+    if enhanced:
+        from .evidence import source_snapshot, verify_source_snapshot, model_hashes, EvidenceWriter
+        from .experiment import _pid_alive, ResourceBusyError
+        process_file = Path(config["outputs"]["root"]) / "process.json"
+        if process_file.exists():
+            process = json.loads(process_file.read_text(encoding="utf-8"))
+            if process.get("state") == "running" and (_pid_alive(process.get("pid")) or _pid_alive(process.get("child_pid"))):
+                raise ResourceBusyError("Wait for the existing experiment pipeline to finish before enhanced evaluation")
+        output = Path(output).resolve()
+        if output.exists():
+            raise FileExistsError("Enhanced evaluation preserves existing outputs; choose a fresh --output directory")
+        frozen = source_snapshot(config)
     artifacts = load_artifacts(config, device)
+    if enhanced:
+        verify_source_snapshot(config, frozen)
+        frozen["model_hashes"] = model_hashes(artifacts)
     cfg = PhysicsConfig(**config["physics"])
     horizons = config["evaluation"]["horizons"]
-    output = Path(config["outputs"]["root"]) / "evaluation"
-    output.mkdir(parents=True, exist_ok=True)
+    output = Path(output) if enhanced else Path(config["outputs"]["root"]) / "evaluation"
+    output.mkdir(parents=True, exist_ok=not enhanced)
     calibration = calibrate(config, artifacts)
     (output / "calibration.json").write_text(json.dumps(calibration, indent=2), encoding="utf-8")
+    evidence = EvidenceWriter(output, config, frozen, calibration) if enhanced else None
     records, uncertainty_rows, decoder_rows, contact_reference_rows = [], [], [], []
     for split in ("test", *OOD_CONDITIONS):
         accumulators = {}
@@ -184,13 +203,19 @@ def evaluate(config: dict, device: str = "auto") -> Path:
                 for action_mode in ("recorded", "removed"):
                     # The ablation removes future interventions only; context remains observed.
                     actions = batch["future_actions"] if action_mode == "recorded" else torch.zeros_like(batch["future_actions"])
-                    for prediction in rollout_predictions(artifacts, initial, actions, cfg, baselines=action_mode == "recorded"):
+                    predictions = rollout_predictions(artifacts, initial, actions, cfg, baselines=action_mode == "recorded")
+                    if evidence and initialization == "estimated" and action_mode == "recorded":
+                        evidence.add_gallery_batch(batch, predictions)
+                    for prediction in predictions:
                         key = (initialization, action_mode, prediction["model"], prediction["seed"])
                         if key not in accumulators:
                             accumulators[key] = RolloutMetrics(horizons, cfg.radius, cfg.dt)
                         pixel_error = decoded_pixel_mse(artifacts["decoder"], prediction["states"], batch["target_frames"])
                         accumulators[key].update(prediction["states"], target, initial, batch["contacts"],
                                                  actions=actions, pixel_mse=pixel_error)
+                        if evidence:
+                            evidence.add(split, initialization, action_mode, prediction, target, initial,
+                                         batch["contacts"], actions, pixel_error, batch, estimated, cfg)
                         if initialization == "estimated" and action_mode == "recorded" and "spread" in prediction:
                             for horizon, values in _uncertainty_samples(prediction, target, horizons).items():
                                 for destination, value in zip(uncertainty[horizon], values):
@@ -212,8 +237,11 @@ def evaluate(config: dict, device: str = "auto") -> Path:
         uncertainty_rows.append({"split": split, "initialization": "estimated", "model": "hybrid_ensemble", "horizons": {
             horizon: uncertainty_metrics(torch.cat(errors), torch.cat(spread), calibration["horizons"][horizon])
             for horizon, (errors, spread) in uncertainty.items()}})
+        if evidence:
+            evidence.finish_split(split)
         print(f"Evaluated {split}: {decoder_count} episodes", flush=True)
-    report = {"format_version": 1, "records": records, "seed_summary": _seed_summary(records),
+    report = {"format_version": 1, "position_rmse_definition": POSITION_RMSE_DEFINITION,
+              "records": records, "seed_summary": _seed_summary(records),
               "uncertainty": uncertainty_rows, "true_state_decoder_error": decoder_rows,
               "true_trajectory_contact_reference": contact_reference_rows,
               "calibration": calibration, "config": config,
@@ -234,4 +262,9 @@ def evaluate(config: dict, device: str = "auto") -> Path:
         writer.writeheader()
         writer.writerows(flattened)
     _plot(records, output / "error_vs_horizon.png")
+    if evidence:
+        verify_source_snapshot(config, frozen)
+        evidence.complete()
+        from .research_report import build_report
+        build_report(output)
     return output

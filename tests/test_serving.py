@@ -2,16 +2,18 @@ from copy import deepcopy
 from dataclasses import asdict
 import json
 from pathlib import Path
+import shutil
 
 import numpy as np
 import pytest
 import torch
 
 from nwm.config import experiment_signature, load_config
+from nwm.metric_definitions import POSITION_RMSE_DEFINITION
 from nwm.models import HybridDynamics, LearnedDynamics, StateDecoder, StateEstimator
 from nwm.physics import PhysicsConfig
-from nwm.serving import calibrated_radii, export_serving, load_serving
-from nwm.training import _model_hash
+from nwm.serving import _checksum, calibrated_radii, export_serving, load_serving
+from nwm.training import _model_hash, load_artifacts
 
 
 @pytest.fixture(scope="module")
@@ -46,6 +48,8 @@ def test_bundle_roundtrip_needs_no_datasets_and_contains_selected_weights_only(s
     loaded = load_serving(path, "cpu")
     assert loaded["metadata"]["experiment_size"] == "smoke"
     assert loaded["metadata"]["selection"]["candidate_scope"] == "trained_single_seed_models"
+    assert loaded["metadata"]["selection"]["position_rmse_definition"] == POSITION_RMSE_DEFINITION
+    assert loaded["metadata"]["selection"]["candidates"]["hybrid_2"] == pytest.approx(93 * 2 ** 0.5)
     assert loaded["metadata"]["default_model"] == "hybrid_2"
     assert "root" not in loaded["config"]["data"] and "outputs" not in loaded["config"]
     assert len(loaded["predictors"]) == 10
@@ -76,10 +80,11 @@ def test_selection_compares_baselines_and_ensemble_on_validation_only(source_exp
     selection = manifest["selection"]
     assert selection["split"] == "validation" and selection["episodes"] == 2
     assert selection["candidate_scope"] == "all_predictors"
+    assert selection["position_rmse_definition"] == POSITION_RMSE_DEFINITION
     assert set(selection["candidates"]) == {
         "constant_velocity", "imperfect_physics", "fitted_physics", "hybrid_ensemble",
         "learned_0", "learned_1", "learned_2", "hybrid_0", "hybrid_1", "hybrid_2"}
-    assert manifest["default_model"] == min(selection["candidates"], key=selection["candidates"].get)
+    assert manifest["default_model"] == min(selection["candidates"], key=lambda name: (selection["candidates"][name], name))
     load_serving(path, "cpu")
 
 
@@ -118,3 +123,84 @@ def test_calibration_rejects_negative_spread(source_experiment):
     calibration = json.loads((Path(source_experiment["outputs"]["root"]) / "evaluation/calibration.json").read_text())
     with pytest.raises(ValueError, match="nonnegative"):
         calibrated_radii(-torch.ones(1, 50, 3), calibration)
+
+
+@pytest.fixture
+def bound_evidence(source_experiment, tmp_path):
+    from nwm.data import generate_episodes
+    config = deepcopy(source_experiment)
+    source = tmp_path / "source"
+    shutil.copytree(config["outputs"]["root"], source)
+    config["outputs"]["root"] = str(source)
+    data = tmp_path / "data"
+    data.mkdir()
+    config["data"]["root"] = str(data)
+    episodes = generate_episodes(np.arange(2), 64, PhysicsConfig())
+    for split in ("train", "validation", "calibration", "test"):
+        np.savez_compressed(data / f"{split}.npz", **episodes)
+    (data / "metadata.json").write_text(json.dumps({"fingerprint": "test-data-fingerprint"}))
+    evaluation = tmp_path / "evaluation"
+    evaluation.mkdir()
+    shutil.copy(source / "evaluation/calibration.json", evaluation / "calibration.json")
+    (evaluation / "metrics.json").write_text(json.dumps({"metric_definition": POSITION_RMSE_DEFINITION}))
+    artifacts = load_artifacts(config, "cpu")
+    models = {name: artifacts[name] for name in ("estimator", "decoder")}
+    models.update({f"{kind}_{seed}": model for kind in ("learned", "hybrid") for seed, model in artifacts[kind]})
+    evidence = {"complete": True, "metric_definition": POSITION_RMSE_DEFINITION,
+                "primary_comparison": {"difference_px": 1.0},
+                "provenance": {"experiment_signature": experiment_signature(config),
+                               "checkpoints": {path.name: _checksum(path) for path in (source / "checkpoints").glob("*.pt")},
+                               "model_hashes": {name: _model_hash(model) for name, model in models.items()},
+                               "dataset_fingerprint": "test-data-fingerprint",
+                               "dataset_files": {path.name: _checksum(path) for path in data.iterdir()},
+                               "fitted_physics_sha256": _checksum(source / "fitted_physics.json")},
+                "files": {path.name: _checksum(path) for path in evaluation.iterdir()}}
+    (evaluation / "evidence.json").write_text(json.dumps(evidence))
+    return config, evaluation, evidence
+
+
+def test_research_bound_bundle_reproduces_evaluated_weights(bound_evidence, tmp_path):
+    config, evaluation, evidence = bound_evidence
+    checkpoints = list((Path(config["outputs"]["root"]) / "checkpoints").glob("*.pt"))
+    before = {path.name: _checksum(path) for path in checkpoints}
+    bundle = export_serving(config, tmp_path / "published", evaluation=evaluation)
+    loaded = load_serving(bundle, "cpu")
+    metadata = loaded["metadata"]
+    assert metadata["research_evidence"]["evidence_sha256"] == _checksum(evaluation / "evidence.json")
+    assert metadata["research_evidence"]["metrics_sha256"] == evidence["files"]["metrics.json"]
+    assert metadata["research_evidence"]["primary_comparison"] == evidence["primary_comparison"]
+    assert metadata["calibration_binding"]["verified"]
+    assert metadata["calibration_binding"]["source"] == "verified_research_evaluation"
+    assert metadata["model_hashes"] == evidence["provenance"]["model_hashes"]
+    assert before == {path.name: _checksum(path) for path in checkpoints}
+    artifacts = load_artifacts(config, "cpu")
+    for kind in ("learned", "hybrid"):
+        for (_, published), (_, source) in zip(loaded[kind], artifacts[kind]):
+            actions = torch.zeros(1, 10, 2)
+            initial = torch.tensor([[[0.2, 0.2, 0.1, 0], [0.5, 0.5, 0, 0], [0.8, 0.8, 0, 0]]])
+            torch.testing.assert_close(published(initial, actions), source(initial, actions), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("tamper", ["incomplete", "definition", "model", "checkpoint", "dataset", "metric_file", "path"])
+def test_research_binding_rejects_changed_or_unbound_evidence(bound_evidence, tmp_path, tamper):
+    config, evaluation, evidence = bound_evidence
+    if tamper == "incomplete":
+        evidence["complete"] = False
+    elif tamper == "definition":
+        evidence["metric_definition"] = "unknown"
+    elif tamper == "model":
+        evidence["provenance"]["model_hashes"]["estimator"] = "wrong"
+    elif tamper == "checkpoint":
+        checkpoint = Path(config["outputs"]["root"]) / "checkpoints/learned_0_best.pt"
+        checkpoint.write_bytes(checkpoint.read_bytes() + b"changed")
+    elif tamper == "dataset":
+        (Path(config["data"]["root"]) / "test.npz").write_bytes(b"changed")
+    elif tamper == "metric_file":
+        (evaluation / "metrics.json").write_text("{}")
+    else:
+        evidence["files"]["../outside"] = "0" * 64
+    (evaluation / "evidence.json").write_text(json.dumps(evidence))
+    with pytest.raises(ValueError, match="evidence"):
+        export_serving(config, tmp_path / "published", evaluation=evaluation)
+    assert not (tmp_path / "published").exists()
+    assert not list(tmp_path.glob(".*.export.lock"))

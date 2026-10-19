@@ -30,11 +30,20 @@ def _open_app_when_ready(url):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Video-based physics experiments")
     commands = parser.add_subparsers(dest="command", required=True)
+    command = commands.add_parser("report")
+    command.add_argument("--evaluation", required=True)
+    command = commands.add_parser("release-research")
+    command.add_argument("--config", default="configs/full.json")
+    command.add_argument("--output", required=True)
+    command.add_argument("--bundle", required=True)
+    command.add_argument("--device", default="cuda", choices=("auto", "cpu", "cuda"))
+    command.add_argument("--wait", action="store_true")
     for name in ("export-serving", "run-experiment", "experiment-status"):
         command = commands.add_parser(name)
         command.add_argument("--config", default="configs/full.json")
         if name == "export-serving":
             command.add_argument("--output", required=True)
+            command.add_argument("--evaluation", help="Bind this bundle to a completed enhanced evaluation")
         if name == "run-experiment":
             command.add_argument("--device", default="cuda", choices=("auto", "cpu", "cuda"))
             command.add_argument("--resume", action="store_true")
@@ -65,7 +74,17 @@ def main(argv=None):
             command.add_argument("--stage", default="all", choices=("all", "perception", "decoder", "learned", "hybrid"))
             command.add_argument("--seed", type=int, action="append", help="Train only listed dynamics seeds")
             command.add_argument("--resume", action="store_true", help="Resume each stage from its last completed epoch")
+        if name == "evaluate":
+            command.add_argument("--output", help="Fresh directory for enhanced episode-level research evidence")
     args = parser.parse_args(argv)
+    if args.command == "report":
+        from .research_report import build_report
+        print(build_report(args.evaluation))
+        return
+    if args.command == "release-research":
+        from .research_release import release_research
+        print(release_research(args.config, args.output, args.bundle, args.device, args.wait))
+        return
     if args.command in ("prepare-real-data", "benchmark-video"):
         from pathlib import Path
         from .app_storage import app_config
@@ -129,7 +148,7 @@ def main(argv=None):
         return
     if args.command == "export-serving":
         from .serving import export_serving
-        print(export_serving(load_config(args.config), args.output))
+        print(export_serving(load_config(args.config), args.output, evaluation=args.evaluation))
         return
     if args.command == "check-device":
         from .training import device_check
@@ -147,7 +166,7 @@ def main(argv=None):
             output = train(config, args.device, args.stage, args.resume, args.seed)
         elif args.command == "evaluate":
             from .evaluation import evaluate
-            output = evaluate(config, args.device)
+            output = evaluate(config, args.device, output=args.output)
         else:
             from .demo import make_demo
             output = make_demo(config, args.device)
