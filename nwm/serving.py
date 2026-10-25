@@ -21,6 +21,7 @@ from .models import HybridDynamics, LearnedDynamics, StateDecoder, StateEstimato
 from .physics import PhysicsConfig
 from .predict import EnsemblePredictor, WorldModelPredictor, constant_velocity_rollout, physics_rollout
 from .training import _load_checkpoint, _model_hash, load_artifacts, resolve_device
+from .provenance import capture_provenance, verify_provenance
 
 
 def _checksum(path):
@@ -53,6 +54,7 @@ def _research_evidence(config, evaluation):
     if evidence.get("complete") is not True or evidence.get("metric_definition") != POSITION_RMSE_DEFINITION:
         raise ValueError("Research evidence must be complete and use the standard position RMSE")
     provenance = evidence.get("provenance", {})
+    verify_provenance(provenance.get("execution_provenance"))
     if provenance.get("experiment_signature") != experiment_signature(config):
         raise ValueError("Research evidence belongs to another experiment")
     files = evidence.get("files", {})
@@ -171,6 +173,7 @@ def export_serving(config, output, evaluation=None):
     try:
         if destination.exists():
             raise FileExistsError(f"Bundle already exists: {destination}")
+        export_provenance = capture_provenance()
         seeds = config["training"]["seeds"]
         if len(seeds) != 3 or len(set(seeds)) != 3:
             raise ValueError("Serving requires three independently seeded dynamics members")
@@ -225,6 +228,8 @@ def export_serving(config, output, evaluation=None):
                 training_complete = False
                 break
         manifest = {"format_version": 1, "architecture": "nwm-fixed-three-discs-v1",
+                    "export_provenance": export_provenance,
+                    "evaluation_provenance": deepcopy(evidence["provenance"].get("execution_provenance")) if evidence else None,
                     "position_rmse_definition": POSITION_RMSE_DEFINITION,
                     "experiment_signature": experiment_signature(config), "config": portable,
                     "experiment_size": "full" if full and training_complete else "full_partial" if full else "smoke",
@@ -241,6 +246,7 @@ def export_serving(config, output, evaluation=None):
             if _research_evidence(config, evaluation)[1] != binding:
                 raise ValueError("Research evidence changed while publishing the bundle")
         (temporary / "manifest.json").write_text(json.dumps(manifest, indent=2, allow_nan=False), encoding="utf-8")
+        verify_provenance(export_provenance)
         os.rename(temporary, destination)
         temporary = None
         return destination

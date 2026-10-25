@@ -106,7 +106,7 @@ def test_offline_regeneration_is_deterministic_without_inference(evaluation, mon
     original_import = builtins.__import__
 
     def checked_import(name, *args, **kwargs):
-        if name in ("torch", "nwm.training", "nwm.models", "nwm.evaluation", "nwm.data"):
+        if name in ("torch", "nwm.training", "nwm.models", "nwm.evaluation", "nwm.data", "nwm.provenance"):
             raise AssertionError(f"Offline report attempted model or dataset import: {name}")
         return original_import(name, *args, **kwargs)
 
@@ -116,6 +116,25 @@ def test_offline_regeneration_is_deterministic_without_inference(evaluation, mon
     first = [sha256(path.read_bytes()).hexdigest() for path in paths]
     build_report(evaluation)
     assert first == [sha256(path.read_bytes()).hexdigest() for path in paths]
+
+
+def test_report_preserves_recorded_provenance_without_reading_checkout(evaluation, monkeypatch):
+    evidence_path = evaluation / "evidence.json"
+    evidence = json.loads(evidence_path.read_text())
+    recorded = {"source_sha256": "historical-source", "git": {"revision": "recorded-commit"},
+                "environment": {"dependencies": {"torch": "historical-version"}},
+                "evaluation_protocol_version": "saved-protocol"}
+    evidence["provenance"]["execution_provenance"] = recorded
+    evidence_path.write_text(json.dumps(evidence))
+    import nwm.provenance as provenance
+    monkeypatch.setattr(provenance, "capture_provenance", lambda *args: pytest.fail("Report inspected current environment"))
+    build_report(evaluation)
+    assert json.loads((evaluation / "statistical_comparisons.json").read_text())["provenance"]["execution_provenance"] == recorded
+    assert "recorded-commit" in (evaluation / "report.html").read_text()
+    del evidence["provenance"]["execution_provenance"]
+    evidence_path.write_text(json.dumps(evidence))
+    build_report(evaluation)
+    assert "unrecorded in this historical artifact" in (evaluation / "report.html").read_text()
 
 
 def test_checksums_and_containment_are_checked(evaluation):

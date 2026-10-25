@@ -9,6 +9,7 @@ The repository also includes a local FastAPI/React app and a separate experiment
 ## Contents
 
 - [Current status and verified evidence](#current-status-and-verified-evidence)
+- [Read-only diagnostics](#read-only-diagnostics)
 - [Local production beta](#local-production-beta)
 - [Run locally](#run-locally)
 - [Configurations and dataset](#configurations-and-dataset)
@@ -51,6 +52,23 @@ python -m nwm experiment-status --config configs/full.json
 ```
 
 This documentation update does not resume training, restart the release worker, download model assets, or start cloud compute.
+
+## Read-only diagnostics
+
+Use `doctor` before resuming a run or diagnosing the local app:
+
+```powershell
+python -m nwm doctor --config configs/full.json --app-config configs/app.json
+python -m nwm doctor --config configs/full.json --verify-artifacts --json
+```
+
+Defaults are the full experiment and checked-in app config. Text output is intended for humans; `--json` emits a version-1 machine-readable report. Exit `0` means no error checks, although warnings may remain; `1` means an error was found; invalid CLI arguments retain exit `2`.
+
+Quick checks report recorded versus observed training/release state, parent/child liveness, heartbeat age, checkpoint presence, last **log-derived** progress, managed quota/free-space reserve, configured bundles, and CUDA availability. An old heartbeat alone does not mean a process is dead. Incomplete experiments, missing optional bundles, unavailable drives, and unavailable CUDA are warnings rather than claims of corruption.
+
+`--verify-artifacts` additionally loads present checkpoints on CPU, checks configuration/model compatibility, validates available datasets, and verifies present serving/evidence artifacts using the existing validators. It performs no prediction. Corrupt or incompatible existing artifacts are errors; missing stages of an unfinished experiment remain warnings.
+
+Diagnostics do not rewrite status, create managed directories, acquire resource locks, resume work, repair artifacts, download assets, or execute GPU kernels. Suggested commands are printed only. CUDA availability is not a kernel compatibility check: explicitly run `python -m nwm check-device --device cuda` when GPU execution is appropriate.
 
 ## Local production beta
 
@@ -134,7 +152,7 @@ python -m nwm benchmark-video --config configs/app.json --manifest D:/NeuralWorl
 
 This adapter selects three development and eight test scenarios from [Physics-IQ Original](https://github.com/google-deepmind/physics-IQ-benchmark), using SHA256 scenario-name ordering, center view and take 1. GCS object generations and checksums pin the downloads. The first command records metadata; downloading is explicit. Source clips are normalized to at most 30 seconds at 384×256/16 FPS. Only the 17 samples ending at t=3 seconds condition each 50-frame rollout. The development split is for hardware feasibility; test clips never train, select or calibrate the model. Results compare pixel MSE against frame holding with one seed, not an official Physics-IQ score or a best-of-N result. The upstream dataset is CC BY 4.0; retain its manifest attribution when sharing clips.
 
-Run `python -m pytest` and `npm test`/`npm run build` in `frontend` to check the pipeline and app. CI runs Python 3.11 CPU tests and the frontend checks. Windows production validation also covers dataset-free inference, request bounds, queue isolation, crash recovery, notebook identity, causal sampling and hostile array headers. Actual large-model inference and the public mini benchmark remain pending the storage and hardware gate.
+Run `python -m pytest` and `npm test`/`npm run build` in `frontend` to check the pipeline and app. CI is configured for Ubuntu/Python 3.11, Windows/Python 3.12 CPU tests, and Ubuntu frontend checks. Hosted Windows results remain pending until an actual Actions run completes. Windows production validation also covers dataset-free inference, request bounds, queue isolation, crash recovery, notebook identity, causal sampling and hostile array headers. Actual large-model inference and the public mini benchmark remain pending the storage and hardware gate.
 
 ## Run locally
 
@@ -389,6 +407,18 @@ python -m nwm export-serving --config configs/full.json --evaluation runs/full/e
 
 The fitted baseline uses the exact simulator force-law family. It may win; a hybrid improvement is not an acceptance requirement. No new force laws, architectures, datasets or training seeds are introduced by this evidence release. General-video hardware feasibility remains a separate, unverified gate.
 
+### Source and environment provenance
+
+New checkpoints, enhanced evaluations, release freezes, and serving manifests also record forward-only execution provenance. The shared helper captures Git revision/dirty state when available, a deterministic source-content digest, installed dependency versions, Python/platform information, and evaluation protocol `nwm-evidence-v1`.
+
+The digest covers sorted relative paths and SHA256 contents of `nwm/**/*.py`, `pyproject.toml`, and requirements files, including untracked package sources. It excludes documentation, tests, datasets, runs, caches, and frontend build output. Source/dependency fingerprints still work without Git, including extracted notebook bundles; unavailable Git identity is recorded explicitly.
+
+New checkpoints retain their original training provenance. When resuming legacy checkpoints, their training origin stays unrecorded and the new execution context is recorded as a resumption. Neither current source nor current dependency versions are retroactively assigned to old weights. Existing checkpoints and other historical artifacts remain readable without migration.
+
+Enhanced evidence records `provenance.execution_provenance`; new freezes record `execution_provenance`. New serving manifests distinguish `evaluation_provenance` copied from the evidence from the current `export_provenance`. A missing historical evaluation record stays `null` rather than being inferred from export time. CPU export and GPU evaluation environments can differ.
+
+For newly captured evidence/releases, source/protocol fingerprints are checked through evaluation and publication in addition to existing data/weight hashes. Git metadata and environment differences alone do not fail source verification. Changes to execution sources require a fresh evaluation. Offline reports display saved provenance only and never inspect the current checkout or installed environment. Legacy artifacts lacking provenance are labeled unrecorded rather than backfilled.
+
 ## Command reference
 
 Every command uses `python -m nwm COMMAND`. Use `--help` on the root or any subcommand to inspect its options.
@@ -400,6 +430,7 @@ Every command uses `python -m nwm COMMAND`. Use `--help` on the root or any subc
 | `evaluate` | Aggregate evaluation, or enhanced evidence with a fresh `--output`; smoke default |
 | `demo` | Decoded and directly rendered rollout comparisons; smoke default |
 | `check-device` | Actual forward/backward computation; `--device` |
+| `doctor` | Read-only full/app diagnostics; `--config`, `--app-config`, `--verify-artifacts`, `--json` |
 | `run-experiment` | Supervised train/evaluate/demo; full config and CUDA default; optional `--resume` |
 | `experiment-status` | Observed supervisor/child state; full config default |
 | `report` | Offline report regeneration; required `--evaluation` |
@@ -424,6 +455,8 @@ nwm/
   training.py                Optimization, coefficient fitting, selection and resume
   metrics.py                 Trajectory, contact and uncertainty measurements
   metric_definitions.py      Shared RMSE definition and legacy compatibility
+  provenance.py             Forward-only source, Git and environment fingerprints
+  diagnostics.py            Read-only project and artifact health checks
   evaluation.py, evidence.py Aggregate and per-episode evidence collection
   research_report.py         Offline bootstrap statistics, plots and HTML
   research_release.py        Frozen-input evaluation and verified publication
@@ -474,13 +507,16 @@ npm run build
 cd ..
 ```
 
-To avoid touching CUDA while training is active, use a separate PowerShell session with `$env:CUDA_VISIBLE_DEVICES='-1'` before pytest. This intentionally skips CUDA cases; it does not verify GPU execution. CI runs Python 3.11 CPU checks and Node 24 frontend tests/build, not full training or large video-model inference.
+To avoid touching CUDA while training is active, use a separate PowerShell session with `$env:CUDA_VISIBLE_DEVICES='-1'` before pytest. This intentionally skips CUDA cases; it does not verify GPU execution. The CI workflow retains Ubuntu/Python 3.11 and Node 24 frontend checks and adds a Windows/Python 3.12 CPU job with a 20-minute timeout. It does not run full training or large video-model inference. Configuration is not proof of a successful hosted run; no workflow is dispatched by local implementation checks.
 
 Tests cover deterministic simulation, overlap-free placement, action timing, drag and collisions, elastic conservation, split isolation, prediction shapes and causal inputs, checkpoint resumption/selection, metric compatibility, episode alignment, identical-predictor zero differences, held-out calibration, offline report regeneration, frozen-input release validation, serving parity, job/queue recovery, notebook identity, causal sampling, and hostile array headers.
+
+Reliability checks additionally cover read-only diagnostics, source changes/untracked files/Git-free bundles, separate evaluation/export environments, and legacy provenance. Native Windows tests exercise child liveness before/after exit, resource-lock release after abrupt owner death, real delete-sharing failures during atomic replacement, and the actual batch launcher from a different working directory with spaces. Launcher fixtures use stub commands and stop before any browser, Explorer, or research run; subprocesses have bounded timeouts and closed stdin.
 
 | Symptom | What to check |
 | --- | --- |
 | Wrong Python environment | Activate `.venv` or use its interpreter explicitly. The batch launcher expects `.venv/Scripts/python.exe`. |
+| Unclear current readiness | Run `doctor`; use `--verify-artifacts` for integrity checks and `--json` for automation. Warnings do not imply failed validation. |
 | Missing data/checkpoints | Generate the selected dataset and train the required stages. A source checkout contains no trained weights. |
 | Incompatible dataset or estimator | Preserve the run; restore the matching configuration or use new data/output roots. Do not bypass identity checks. |
 | CUDA unavailable or unsupported kernel | Run `check-device --device cuda`; check the wheel and driver against the official installer. CPU supports small checks. |

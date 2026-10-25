@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, replace
 import json
 import hashlib
@@ -24,6 +25,7 @@ from .metric_definitions import (POSITION_RMSE_DEFINITION, normalize_checkpoint_
                                  position_squared_error)
 from .models import HybridDynamics, LearnedDynamics, StateDecoder, StateEstimator
 from .physics import PhysicsConfig, render_states
+from .provenance import capture_provenance
 
 
 def resolve_device(name="auto"):
@@ -178,6 +180,7 @@ def _fit_stage(config, model, stage, seed, train_set, validation_set, device, re
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=settings["learning_rate"])
     start, best, stale, history, best_state, best_epoch = 0, math.inf, 0, [], None, -1
+    previous = None
     if latest_path.exists():
         if not resume:
             raise FileExistsError(f"{latest_path} exists; pass --resume or use another outputs.root")
@@ -197,6 +200,17 @@ def _fit_stage(config, model, stage, seed, train_set, validation_set, device, re
         _restore_rng(previous["rng"])
         if previous.get("stopped_early"):
             start = epochs
+    training_provenance = None
+    if start < epochs:
+        current = capture_provenance()
+        if previous is None:
+            training_provenance = {"origin": current, "resumptions": []}
+        else:
+            training_provenance = deepcopy(previous.get("training_provenance", {"origin": None, "resumptions": []}))
+            if (not isinstance(training_provenance, dict) or "origin" not in training_provenance
+                    or not isinstance(training_provenance.get("resumptions"), list)):
+                raise ValueError("Checkpoint has malformed training provenance")
+            training_provenance["resumptions"].append(current)
     train_loader, val_loader = _loader(train_set, config, True), _loader(validation_set, config)
     for epoch in range(start, epochs):
         began = time.monotonic()
@@ -246,6 +260,7 @@ def _fit_stage(config, model, stage, seed, train_set, validation_set, device, re
                       "selection_metric": selection_metric,
                       "stale": stale, "stopped_early": stopped, "history": history,
                       "model": state, "best_model": best_state, "best_epoch": best_epoch,
+                      "training_provenance": training_provenance,
                       "perception_hash": perception_hash,
                       "optimizer": optimizer.state_dict(), "rng": _rng_state()}
         if stage in ("learned", "hybrid"):

@@ -48,6 +48,7 @@ def release_stages(tmp_path, monkeypatch):
         (output / "calibration.json").write_text('{"split":"calibration"}')
         evidence = {"format_version": 1, "complete": True, "metric_definition": POSITION_RMSE_DEFINITION,
                     "provenance": {
+                        "execution_provenance": release.capture_provenance(),
                         "checkpoints": {p.name: release._sha256(p) for p in (run / "checkpoints").glob("*_best.pt")},
                         "dataset_files": {p.name: release._sha256(p) for p in data.iterdir()},
                         "fitted_physics_sha256": release._sha256(run / "fitted_physics.json"),
@@ -187,6 +188,58 @@ def test_input_mutation_during_evaluation_prevents_publication(release_stages, m
     with pytest.raises(ValueError, match="Frozen research inputs changed"):
         release.release_research(config, output, bundle, "cpu")
     assert calls["evaluate"] == 1 and calls["export"] == 0 and not bundle.exists()
+
+
+def test_source_mutation_during_evaluation_prevents_publication(release_stages, monkeypatch, tmp_path):
+    from nwm.provenance import capture_provenance, verify_provenance
+    config, output, bundle, calls = release_stages
+    source = tmp_path / "source"
+    (source / "nwm").mkdir(parents=True)
+    module = source / "nwm/model.py"
+    module.write_text("version = 1\n")
+    monkeypatch.setattr(release, "capture_provenance", lambda: capture_provenance(source))
+    monkeypatch.setattr(release, "verify_provenance", lambda value: verify_provenance(value, source))
+    evaluate = release.evaluation.evaluate
+
+    def mutate(*args, **kwargs):
+        evaluate(*args, **kwargs)
+        module.write_text("version = 2\n")
+
+    monkeypatch.setattr(release.evaluation, "evaluate", mutate)
+    with pytest.raises(ValueError, match="source or evaluation protocol changed"):
+        release.release_research(config, output, bundle, "cpu")
+    assert calls["evaluate"] == 1 and calls["export"] == 0 and not bundle.exists()
+
+
+def test_legacy_freeze_is_not_backfilled_or_rewritten(release_stages):
+    config_path, output, bundle, calls = release_stages
+    config = load_config(config_path)
+    legacy = release._freeze_inputs(config, config_path)
+    del legacy["execution_provenance"]
+    state_root = output.with_name(".evaluation.research-release")
+    state_root.mkdir()
+    freeze_path = state_root / "freeze.json"
+    freeze_path.write_text(json.dumps(legacy))
+    before = freeze_path.read_bytes()
+    release.release_research(config_path, output, bundle, "cpu")
+    assert freeze_path.read_bytes() == before
+    assert calls["evaluate"] == 1 and calls["export"] == 1
+
+
+def test_existing_legacy_evaluation_without_freeze_publishes_without_inference(release_stages):
+    config_path, output, bundle, calls = release_stages
+    release.evaluation.evaluate(load_config(config_path), "cpu", output=output)
+    path = output / "evidence.json"
+    evidence = json.loads(path.read_text())
+    del evidence["provenance"]["execution_provenance"]
+    path.write_text(json.dumps(evidence))
+    before = path.read_bytes()
+    calls["evaluate"] = 0
+    release.release_research(config_path, output, bundle, "cpu")
+    assert calls["evaluate"] == 0 and calls["export"] == 1
+    assert path.read_bytes() == before
+    frozen = json.loads((output.with_name(".evaluation.research-release") / "freeze.json").read_text())
+    assert frozen["execution_provenance"] is None
 
 
 @pytest.mark.parametrize("tamper", ["input", "artifact", "binding"])

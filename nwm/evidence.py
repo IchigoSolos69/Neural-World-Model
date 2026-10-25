@@ -13,6 +13,7 @@ import torch
 from .config import experiment_signature
 from .metric_definitions import POSITION_RMSE_DEFINITION, position_squared_error
 from .metrics import collision_counts, infer_contacts
+from .provenance import capture_provenance, verify_provenance
 
 
 def sha256_file(path):
@@ -23,7 +24,7 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def source_snapshot(config):
+def _input_snapshot(config):
     data = Path(config["data"]["root"])
     run = Path(config["outputs"]["root"])
     metadata = json.loads((data / "metadata.json").read_text(encoding="utf-8"))
@@ -35,10 +36,15 @@ def source_snapshot(config):
             "fitted_physics_sha256": sha256_file(run / "fitted_physics.json")}
 
 
+def source_snapshot(config):
+    return {**_input_snapshot(config), "execution_provenance": capture_provenance()}
+
+
 def verify_source_snapshot(config, expected):
-    actual = source_snapshot(config)
+    actual = _input_snapshot(config)
     if any(actual[key] != value for key, value in expected.items() if key in actual):
         raise ValueError("Experiment inputs changed during evidence evaluation; preserve this incomplete output and use a fresh directory")
+    verify_provenance(expected.get("execution_provenance"))
 
 
 def model_hashes(artifacts):
@@ -55,7 +61,7 @@ def checkpoint_history(config):
         value = _load_checkpoint(path, config)
         histories[path.stem.removesuffix("_latest")] = {
             key: value[key] for key in ("stage", "epoch", "best_epoch", "best_metric", "selection_metric",
-                                        "position_rmse_definition", "position_rmse_compatibility", "history") if key in value}
+                                        "position_rmse_definition", "position_rmse_compatibility", "training_provenance", "history") if key in value}
     return histories
 
 

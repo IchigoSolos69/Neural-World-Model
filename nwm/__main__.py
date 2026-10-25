@@ -30,6 +30,11 @@ def _open_app_when_ready(url):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Video-based physics experiments")
     commands = parser.add_subparsers(dest="command", required=True)
+    command = commands.add_parser("doctor", help="Read-only project diagnostics")
+    command.add_argument("--config", default="configs/full.json")
+    command.add_argument("--app-config", default="configs/app.json")
+    command.add_argument("--verify-artifacts", action="store_true")
+    command.add_argument("--json", action="store_true", dest="as_json")
     command = commands.add_parser("report")
     command.add_argument("--evaluation", required=True)
     command = commands.add_parser("release-research")
@@ -77,6 +82,11 @@ def main(argv=None):
         if name == "evaluate":
             command.add_argument("--output", help="Fresh directory for enhanced episode-level research evidence")
     args = parser.parse_args(argv)
+    if args.command == "doctor":
+        from .diagnostics import diagnose, format_report
+        report = diagnose(args.config, args.app_config, args.verify_artifacts)
+        print(json.dumps(report, indent=2, allow_nan=False) if args.as_json else format_report(report))
+        raise SystemExit(report["exit_code"])
     if args.command == "report":
         from .research_report import build_report
         print(build_report(args.evaluation))

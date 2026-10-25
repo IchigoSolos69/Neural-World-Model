@@ -98,6 +98,8 @@ def test_epoch_boundary_resume_matches_uninterrupted(tmp_path, monkeypatch, inte
     config["training"].update(dynamics_epochs=3, batch_size=2, patience=20)
     dataset = TinyWindows()
     import nwm.training as training
+    captured = iter([{"source": "original"}, {"source": "resumed"}, {"source": "continuous"}])
+    monkeypatch.setattr(training, "capture_provenance", lambda: next(captured))
     real_save = training._atomic_save
 
     def interrupt_after_first_best(value, path):
@@ -115,6 +117,7 @@ def test_epoch_boundary_resume_matches_uninterrupted(tmp_path, monkeypatch, inte
         for path in (tmp_path / "resumed/checkpoints").glob("*.pt"):
             checkpoint = torch.load(path, weights_only=True)
             del checkpoint["position_rmse_definition"]
+            del checkpoint["training_provenance"]
             checkpoint["best_metric"] /= 2 ** 0.5
             for row in checkpoint["history"]:
                 row["validation"] /= 2 ** 0.5
@@ -131,6 +134,12 @@ def test_epoch_boundary_resume_matches_uninterrupted(tmp_path, monkeypatch, inte
         [row["validation"] for row in full_checkpoint["history"]])
     assert resume_checkpoint["best_epoch"] == full_checkpoint["best_epoch"]
     assert resume_checkpoint["position_rmse_definition"] == "euclidean_position_rmse_px_v1"
+    assert resume_checkpoint["training_provenance"] == {
+        "origin": None if legacy_metrics else {"source": "original"},
+        "resumptions": [{"source": "resumed"}],
+    }
+    assert full_checkpoint["training_provenance"] == {
+        "origin": {"source": "continuous"}, "resumptions": []}
     torch.testing.assert_close(resume_checkpoint["rng"]["torch"], full_checkpoint["rng"]["torch"], rtol=0, atol=0)
     for key, value in resume_checkpoint["optimizer"]["state"][0].items():
         torch.testing.assert_close(value, full_checkpoint["optimizer"]["state"][0][key], rtol=0, atol=0)
@@ -156,3 +165,12 @@ def test_early_stopping_gives_new_curriculum_stage_its_patience(tmp_path, monkey
     checkpoint = torch.load(tmp_path / "checkpoints/learned_0_latest.pt", weights_only=True)
     assert checkpoint["stopped_early"]
     assert sum(row["horizon"] == 20 for row in checkpoint["history"]) == 2
+    # No-op legacy resumes must not relabel old weights with today's sources.
+    del checkpoint["training_provenance"]
+    latest = tmp_path / "checkpoints/learned_0_latest.pt"
+    torch.save(checkpoint, latest)
+    before = latest.read_bytes()
+    monkeypatch.setattr(training, "capture_provenance", lambda: pytest.fail("No new epoch requires provenance"))
+    _fit_stage(config, TinyDynamics(), "learned", 0, TinyWindows(), TinyWindows(), "cpu", True)
+    assert latest.read_bytes() == before
+    assert "training_provenance" not in torch.load(tmp_path / "checkpoints/learned_0_best.pt", weights_only=True)

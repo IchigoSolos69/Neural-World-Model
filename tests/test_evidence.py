@@ -53,6 +53,13 @@ def test_source_changes_are_detected(tmp_path):
     (run / "checkpoints/hybrid_0_best.pt").write_bytes(b"weights")
     frozen = source_snapshot(config)
     verify_source_snapshot(config, frozen)
+    assert frozen["execution_provenance"]["environment"]["dependencies"]
+    incompatible_source = deepcopy(frozen)
+    incompatible_source["execution_provenance"]["source_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="source or evaluation protocol changed"):
+        verify_source_snapshot(config, incompatible_source)
+    legacy = {key: value for key, value in frozen.items() if key != "execution_provenance"}
+    verify_source_snapshot(config, legacy)
     (run / "checkpoints/hybrid_0_best.pt").write_bytes(b"different")
     with pytest.raises(ValueError, match="inputs changed"):
         verify_source_snapshot(config, frozen)
@@ -76,6 +83,7 @@ def test_enhanced_evaluation_isolated_and_reconstructible(source_experiment, tmp
     evaluate(config, "cpu", output=output)
     verify_source_snapshot(config, before)
     evidence = json.loads((output / "evidence.json").read_text())
+    assert evidence["provenance"]["execution_provenance"]["source_sha256"] == before["execution_provenance"]["source_sha256"]
     assert evidence["complete"] and len(evidence["groups"]) == 6 * 34
     assert len(evidence["gallery"]) == 18
     groups = {(row["split"], row["initialization"], row["actions"], row["model"], row["seed"]): row for row in evidence["groups"]}

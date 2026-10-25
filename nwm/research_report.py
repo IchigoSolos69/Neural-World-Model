@@ -475,14 +475,23 @@ def _html(root: Path, evidence: dict, metrics: dict, statistics: dict, plots: li
                     "Rebuild with <code>python -m nwm report --evaluation PATH</code>. "
                     "<a href='statistical_comparisons.json'>All statistics (JSON)</a> · <a href='evidence.json'>Evidence manifest</a> · <a href='metrics.json'>Original aggregate metrics</a></p>" +
                     f"<details><summary>Frozen checkpoint and dataset fingerprints</summary><pre>{escape(json.dumps(evidence.get('provenance', {}), indent=2, sort_keys=True))}</pre></details>")
+    execution = evidence.get("provenance", {}).get("execution_provenance")
+    if execution is None:
+        sections.append("<p>Evaluation source and environment provenance: unrecorded in this historical artifact. "
+                        "The current checkout is not used to fill missing provenance.</p>")
+    else:
+        sections.append("<p>Evaluation source and environment provenance was captured for this evaluation. "
+                        "It does not establish the training origin of legacy checkpoints.</p>" +
+                        f"<details><summary>Recorded evaluation source, dependencies, and protocol</summary><pre>{escape(json.dumps(execution, indent=2, sort_keys=True))}</pre></details>")
     histories = evidence.get("training_history", {})
     if histories:
         sections.append("<h2>Training selection and compatibility</h2><p>Historical dynamics validation metrics averaged squared error across x/y. "
                         "Their displayed validation values are converted by √2 into the shared Euclidean definition, without changing source files or checkpoint rankings. "
                         "Training losses, optimizer state, and random-number state are unchanged.</p>" + _table(
-            ["Stage", "Selected epoch", "Selection metric", "Selected value", "Compatibility conversion"],
+            ["Stage", "Selected epoch", "Selection metric", "Selected value", "Compatibility conversion", "Training source origin"],
             [[tag, value.get("best_epoch", -1) + 1, value.get("selection_metric", "not recorded"),
-              _number(value.get("best_metric")), "×√2 from coordinate RMSE" if value.get("position_rmse_compatibility") else "None"]
+              _number(value.get("best_metric")), "×√2 from coordinate RMSE" if value.get("position_rmse_compatibility") else "None",
+              "Recorded" if (value.get("training_provenance") or {}).get("origin") else "Unrecorded"]
              for tag, value in histories.items()]))
     sections.append("<h2>Limits</h2><p>The fitted-physics predictor uses the exact force-law family of this simulator. Strong fitted-physics results are expected; "
                     "a hybrid improvement is an experimental hypothesis, not an acceptance requirement. The prototype uses fixed identities, geometry, training-only state supervision, "

@@ -23,6 +23,7 @@ from .metric_definitions import POSITION_RMSE_DEFINITION
 from .physics import PhysicsConfig
 from .predict import EnsemblePredictor, WorldModelPredictor, constant_velocity_rollout, physics_rollout
 from .training import load_artifacts, resolve_device
+from .provenance import capture_provenance, verify_provenance
 
 
 def _sha256(path):
@@ -61,12 +62,16 @@ def _freeze_inputs(config, config_path):
             raise ValueError(f"Cannot freeze a missing or symbolic input: {path}")
         files[str(path.resolve())] = _sha256(path)
     return {"format_version": 1, "experiment_signature": experiment_signature(config),
-            "config": config, "files": files}
+            "config": config, "files": files, "execution_provenance": capture_provenance()}
 
 
 def _check_frozen(config, config_path, expected):
-    if _freeze_inputs(config, config_path) != expected:
+    actual = _freeze_inputs(config, config_path)
+    # Older freezes cannot attest which source code ran; do not backfill them.
+    if ({key: value for key, value in actual.items() if key != "execution_provenance"}
+            != {key: value for key, value in expected.items() if key != "execution_provenance"}):
         raise ValueError("Frozen research inputs changed; refuse to mix experiments or overwrite this release")
+    verify_provenance(expected.get("execution_provenance"))
 
 
 def _complete_evidence(output, freeze):
@@ -78,6 +83,14 @@ def _complete_evidence(output, freeze):
             or evidence.get("metric_definition") != POSITION_RMSE_DEFINITION):
         raise ValueError("Existing evaluation has no complete, compatible research evidence")
     provenance = evidence.get("provenance", {})
+    recorded_execution = provenance.get("execution_provenance")
+    frozen_execution = freeze.get("execution_provenance")
+    if frozen_execution is not None:
+        if not isinstance(recorded_execution, dict) or any(
+                recorded_execution.get(key) != frozen_execution.get(key)
+                for key in ("source_sha256", "evaluation_protocol_version")):
+            raise ValueError("Evaluation source provenance differs from the frozen research inputs")
+    verify_provenance(recorded_execution)
     config = freeze["config"]
     run, data = Path(config["outputs"]["root"]), Path(config["data"]["root"])
     for basename, checksum in provenance.get("checkpoints", {}).items():
@@ -180,13 +193,19 @@ def release_research(config_path, output, bundle, device="cuda", wait=False, pol
             resolved_device = resolve_device(device)
             with gpu_lock() if resolved_device.type == "cuda" else nullcontext():
                 freeze_path = state_root / "freeze.json"
-                current = _freeze_inputs(config, config_path)
                 if freeze_path.exists():
                     frozen = json.loads(freeze_path.read_text(encoding="utf-8"))
-                    if frozen != current:
-                        raise ValueError("Frozen research inputs changed; use a separate release directory")
+                    _check_frozen(config, config_path, frozen)
                 else:
-                    frozen = current
+                    frozen = _freeze_inputs(config, config_path)
+                    if output.exists():
+                        previous_path = output / "evidence.json"
+                        if not previous_path.is_file() or previous_path.is_symlink():
+                            raise ValueError("Existing evaluation is incomplete; use a new output directory instead of rerunning inference over it")
+                        previous = json.loads(previous_path.read_text(encoding="utf-8"))
+                        # Publication today cannot attest to an older evaluation's execution.
+                        frozen["execution_provenance"] = previous.get("provenance", {}).get("execution_provenance")
+                        _complete_evidence(output, frozen)
                     _write_json(freeze_path, frozen, immutable=True)
                 update(state="evaluating", freeze_sha256=_sha256(freeze_path), device=str(resolved_device))
                 if not output.exists():

@@ -172,6 +172,8 @@ def test_research_bound_bundle_reproduces_evaluated_weights(bound_evidence, tmp_
     assert metadata["calibration_binding"]["verified"]
     assert metadata["calibration_binding"]["source"] == "verified_research_evaluation"
     assert metadata["model_hashes"] == evidence["provenance"]["model_hashes"]
+    assert metadata["export_provenance"]["environment"]["dependencies"]
+    assert metadata["evaluation_provenance"] is None  # Never infer a legacy evaluation's source.
     assert before == {path.name: _checksum(path) for path in checkpoints}
     artifacts = load_artifacts(config, "cpu")
     for kind in ("learned", "hybrid"):
@@ -179,6 +181,32 @@ def test_research_bound_bundle_reproduces_evaluated_weights(bound_evidence, tmp_
             actions = torch.zeros(1, 10, 2)
             initial = torch.tensor([[[0.2, 0.2, 0.1, 0], [0.5, 0.5, 0, 0], [0.8, 0.8, 0, 0]]])
             torch.testing.assert_close(published(initial, actions), source(initial, actions), rtol=0, atol=0)
+
+
+def test_bundle_retains_evaluation_provenance_separately_from_export(bound_evidence, tmp_path):
+    from nwm.provenance import capture_provenance
+    config, evaluation, evidence = bound_evidence
+    recorded = capture_provenance()
+    recorded["environment"]["python"] = "historical-python"
+    recorded["environment"]["dependencies"]["torch"] = "historical-gpu-wheel"
+    evidence["provenance"]["execution_provenance"] = recorded
+    (evaluation / "evidence.json").write_text(json.dumps(evidence))
+    bundle = export_serving(config, tmp_path / "published", evaluation=evaluation)
+    metadata = load_serving(bundle, "cpu")["metadata"]
+    assert metadata["evaluation_provenance"] == recorded
+    assert metadata["export_provenance"]["environment"]["python"] != "historical-python"
+
+
+def test_bundle_refuses_changed_evaluation_source(bound_evidence, tmp_path):
+    from nwm.provenance import capture_provenance
+    config, evaluation, evidence = bound_evidence
+    recorded = capture_provenance()
+    recorded["source_sha256"] = "0" * 64
+    evidence["provenance"]["execution_provenance"] = recorded
+    (evaluation / "evidence.json").write_text(json.dumps(evidence))
+    with pytest.raises(ValueError, match="source or evaluation protocol changed"):
+        export_serving(config, tmp_path / "published", evaluation=evaluation)
+    assert not (tmp_path / "published").exists()
 
 
 @pytest.mark.parametrize("tamper", ["incomplete", "definition", "model", "checkpoint", "dataset", "metric_file", "path"])
