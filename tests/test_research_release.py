@@ -67,6 +67,7 @@ def release_stages(tmp_path, monkeypatch):
         bundle.mkdir()
         (bundle / "manifest.json").write_text(json.dumps({
             "training_complete": True,
+            "export_provenance": release.capture_provenance(),
             "research_evidence": {"evidence_sha256": release._sha256(evaluation / "evidence.json"),
                                   "metrics_sha256": release._sha256(evaluation / "metrics.json")},
             "model_hashes": model_hashes}))
@@ -240,6 +241,44 @@ def test_existing_legacy_evaluation_without_freeze_publishes_without_inference(r
     assert path.read_bytes() == before
     frozen = json.loads((output.with_name(".evaluation.research-release") / "freeze.json").read_text())
     assert frozen["execution_provenance"] is None
+
+
+@pytest.mark.parametrize("existing_freeze", [False, True])
+def test_legacy_release_checks_export_source_after_parity(release_stages, monkeypatch, tmp_path, existing_freeze):
+    from nwm.provenance import capture_provenance, verify_provenance
+    config_path, output, bundle, calls = release_stages
+    source = tmp_path / "source"
+    (source / "nwm").mkdir(parents=True)
+    module = source / "nwm/model.py"
+    module.write_text("version = 1\n")
+    monkeypatch.setattr(release, "capture_provenance", lambda: capture_provenance(source))
+    monkeypatch.setattr(release, "verify_provenance", lambda value: verify_provenance(value, source))
+    release.evaluation.evaluate(load_config(config_path), "cpu", output=output)
+    path = output / "evidence.json"
+    evidence = json.loads(path.read_text())
+    del evidence["provenance"]["execution_provenance"]
+    path.write_text(json.dumps(evidence))
+    before = path.read_bytes()
+    calls["evaluate"] = 0
+    if existing_freeze:
+        frozen = release._freeze_inputs(load_config(config_path), config_path)
+        del frozen["execution_provenance"]
+        state_root = output.with_name(".evaluation.research-release")
+        state_root.mkdir()
+        (state_root / "freeze.json").write_text(json.dumps(frozen))
+    parity = release.verify_serving_parity
+
+    def mutate(*args, **kwargs):
+        result = parity(*args, **kwargs)
+        module.write_text("version = 2\n")
+        return result
+
+    monkeypatch.setattr(release, "verify_serving_parity", mutate)
+    with pytest.raises(ValueError, match="source or evaluation protocol changed"):
+        release.release_research(config_path, output, bundle, "cpu")
+    assert calls["evaluate"] == 0 and calls["export"] == calls["parity"] == 1
+    assert path.read_bytes() == before
+    assert not bundle.exists() and bundle.with_name(".bundle.research-staging").exists()
 
 
 @pytest.mark.parametrize("tamper", ["input", "artifact", "binding"])

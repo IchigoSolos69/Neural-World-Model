@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 
 from .config import load_config
 from .experiment import _pid_alive
@@ -20,12 +22,62 @@ def _json(path):
     return value
 
 
+def _pid_created_at(pid):
+    """Read native process start time, or leave identity unknown when unavailable."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or not 0 < pid < 2**32:
+        return None
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel.OpenProcess.restype = wintypes.HANDLE
+            kernel.GetProcessTimes.argtypes = [wintypes.HANDLE, *([ctypes.POINTER(wintypes.FILETIME)] * 4)]
+            kernel.GetProcessTimes.restype = wintypes.BOOL
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            handle = kernel.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return None
+            try:
+                created, exited, kernel_time, user_time = (wintypes.FILETIME() for _ in range(4))
+                if not kernel.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited),
+                                              ctypes.byref(kernel_time), ctypes.byref(user_time)):
+                    return None
+                ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+                return datetime.fromtimestamp(ticks / 10_000_000 - 11_644_473_600, timezone.utc)
+            finally:
+                kernel.CloseHandle(handle)
+        if sys.platform.startswith("linux"):
+            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+            boot = next(line.split()[1] for line in Path("/proc/stat").read_text().splitlines()
+                        if line.startswith("btime "))
+            return datetime.fromtimestamp(int(boot) + int(fields[19]) / os.sysconf("SC_CLK_TCK"), timezone.utc)
+    except (OSError, ValueError, IndexError, StopIteration, OverflowError):
+        pass
+    return None
+
+
 def _process(path, now, stale_after):
     if not path.is_file():
         return {"path": str(path), "recorded_state": None, "observed_state": "not_started",
                 "pid_alive": False, "child_alive": False, "heartbeat": "missing", "heartbeat_age_seconds": None}
     value = _json(path)
-    pid_alive = _pid_alive(value.get("pid"))
+    pid_exists = _pid_alive(value.get("pid"))
+    pid_alive = pid_exists
+    identity, created = "not_running" if not pid_exists else "unrecorded", None
+    if pid_exists and value.get("started_at"):
+        identity = "unverified"
+        try:
+            started = datetime.fromisoformat(value["started_at"])
+            if started.tzinfo is not None:
+                created = _pid_created_at(value.get("pid"))
+                if created is not None:
+                    # Status is written after startup; a later process cannot be its owner.
+                    identity = "reused" if (created - started).total_seconds() > 2 else "consistent_start_time"
+                    pid_alive = identity != "reused"
+        except (ValueError, TypeError):
+            pass
     child_alive = _pid_alive(value.get("child_pid"))
     recorded = value.get("state", "unknown")
     active = recorded in {"running", "waiting", "starting", "evaluating", "reporting", "publishing"}
@@ -45,6 +97,8 @@ def _process(path, now, stale_after):
     return {"path": str(path), "recorded_state": recorded, "observed_state": observed,
             "pid": value.get("pid"), "child_pid": value.get("child_pid"),
             "pid_alive": pid_alive, "child_alive": child_alive, "stage": value.get("stage"),
+            "pid_exists": pid_exists, "pid_identity": identity,
+            "pid_created_at": created.isoformat() if created is not None else None,
             "heartbeat": heartbeat, "heartbeat_age_seconds": age,
             "output": value.get("output"), "bundle": value.get("bundle")}
 
@@ -112,8 +166,13 @@ def diagnose(config_path="configs/full.json", app_config_path="configs/app.json"
             state = observed["observed_state"]
             warning = (state in {"not_started", "interrupted", "failed", "unknown"}
                        or observed["heartbeat"] in {"invalid", "stale", "missing"}
+                       or observed.get("pid_identity") == "unverified"
                        or (state == "complete" and (observed["pid_alive"] or observed["child_alive"])))
             message = f"recorded={observed['recorded_state']}, observed={state}; heartbeat={observed['heartbeat']}"
+            if observed.get("pid_identity") == "reused":
+                message += "; PID was reused by a newer process"
+            elif observed.get("pid_identity") == "unverified":
+                message += "; native process start time could not verify PID identity"
             if observed["child_alive"] and not observed["pid_alive"]:
                 warning = True
                 message += "; child is still alive: do not start another trainer"

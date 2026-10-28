@@ -230,6 +230,7 @@ def release_research(config_path, output, bundle, device="cuda", wait=False, pol
                     raise ValueError("The evaluated experiment has incomplete training stages; refuse to publish it as a completed research release")
                 parity = verify_serving_parity(config, candidate)
                 _check_frozen(config, config_path, frozen)
+                verify_provenance(published["metadata"].get("export_provenance"))
                 _write_json(state_root / "parity.json", parity)
                 if candidate != bundle:
                     if bundle.exists():

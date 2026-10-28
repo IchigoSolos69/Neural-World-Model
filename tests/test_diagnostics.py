@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta, timezone
 from dataclasses import asdict
 import json
+import os
 from pathlib import Path
+import sys
 
 import pytest
 import torch
@@ -83,6 +85,65 @@ def test_old_or_bad_heartbeat_never_declares_a_live_process_dead(project, monkey
     assert report["experiment"]["observed_state"] == "running"
     assert report["experiment"]["pid_alive"]
     assert not any("--resume" in command for command in report["next_commands"])
+
+
+@pytest.mark.parametrize("release", [False, True])
+def test_reused_pid_does_not_keep_a_stopped_worker_alive(project, monkeypatch, release):
+    config, app, root = project
+    now = datetime.now(timezone.utc)
+    _state(root, {"state": "waiting" if release else "running", "pid": 123,
+                  "started_at": (now - timedelta(days=9)).isoformat(),
+                  "heartbeat_at": (now - timedelta(days=9)).isoformat()}, release=release)
+    monkeypatch.setattr(diagnostics, "_pid_alive", lambda pid: pid == 123)
+    monkeypatch.setattr(diagnostics, "_pid_created_at", lambda pid: now - timedelta(seconds=10))
+    before = _files(root)
+    report = diagnostics.diagnose(config, app)
+    observed = report["releases"][0] if release else report["experiment"]
+    assert observed["pid_exists"] and not observed["pid_alive"]
+    assert observed["pid_identity"] == "reused" and observed["observed_state"] == "interrupted"
+    assert observed["pid_created_at"]
+    assert any("PID was reused" in item["message"] for item in report["checks"])
+    assert _files(root) == before
+
+
+def test_unavailable_native_start_time_keeps_live_pid_conservatively_alive(project, monkeypatch):
+    config, app, root = project
+    old = datetime.now(timezone.utc) - timedelta(hours=1)
+    _state(root, {"state": "running", "pid": 123, "started_at": old.isoformat(),
+                  "heartbeat_at": old.isoformat()})
+    monkeypatch.setattr(diagnostics, "_pid_alive", lambda pid: pid == 123)
+    monkeypatch.setattr(diagnostics, "_pid_created_at", lambda pid: None)
+    before = _files(root)
+    report = diagnostics.diagnose(config, app)
+    assert report["experiment"]["pid_alive"]
+    assert report["experiment"]["pid_identity"] == "unverified"
+    assert report["experiment"]["observed_state"] == "running"
+    assert not any("--resume" in command for command in report["next_commands"])
+    assert _files(root) == before
+
+
+def test_consistent_start_time_does_not_treat_stale_heartbeat_as_process_death(project, monkeypatch):
+    config, app, root = project
+    old = datetime.now(timezone.utc) - timedelta(hours=1)
+    _state(root, {"state": "running", "pid": 123, "started_at": old.isoformat(),
+                  "heartbeat_at": old.isoformat()})
+    monkeypatch.setattr(diagnostics, "_pid_alive", lambda pid: pid == 123)
+    monkeypatch.setattr(diagnostics, "_pid_created_at", lambda pid: old - timedelta(seconds=1))
+    report = diagnostics.diagnose(config, app)
+    assert report["experiment"]["pid_identity"] == "consistent_start_time"
+    assert report["experiment"]["pid_alive"]
+    assert report["experiment"]["observed_state"] == "running"
+    assert report["experiment"]["heartbeat"] == "stale"
+
+
+@pytest.mark.skipif(os.name != "nt" and not sys.platform.startswith("linux"), reason="Native start-time support")
+def test_native_start_time_reads_current_process_without_subprocess(monkeypatch):
+    monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: pytest.fail("Started subprocess"))
+    created = diagnostics._pid_created_at(os.getpid())
+    assert created is not None
+    assert created.tzinfo is not None and created <= datetime.now(timezone.utc)
+    assert created.year >= 2020
+    assert diagnostics._pid_created_at(None) is None
 
 
 def test_live_orphan_child_blocks_resumption_suggestion(project, monkeypatch):
